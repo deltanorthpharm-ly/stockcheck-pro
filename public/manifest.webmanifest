@@ -1,0 +1,16 @@
+{
+  "name": "StockCount Pro — جرد الصيدلية",
+  "short_name": "StockCount",
+  "description": "تطبيق جرد الصيدلية على الهاتف",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#ffffff",
+  "theme_color": "#0e9488",
+  "lang": "ar",
+  "dir": "rtl",
+  "icons": [
+    { "src": "/favicon.ico", "sizes": "64x64", "type": "image/x-icon" }
+  ]
+}
