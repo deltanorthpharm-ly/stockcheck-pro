@@ -148,16 +148,16 @@ export const autoAssignByRange = createServerFn({ method: "POST" })
     const list = items ?? [];
     if (list.length === 0) return { assigned: 0 };
     const perEmp = Math.ceil(list.length / data.employee_ids.length);
-    const updates: Promise<any>[] = [];
+    const updates: Promise<unknown>[] = [];
     for (let i = 0; i < list.length; i++) {
       const empIdx = Math.min(Math.floor(i / perEmp), data.employee_ids.length - 1);
       const emp = data.employee_ids[empIdx];
-      updates.push(
-        context.supabase
+      const p = context.supabase
           .from("inventory_items")
           .update({ assigned_to: emp })
-          .eq("id", list[i].id),
-      );
+          .eq("id", list[i].id);
+      // Cast the builder-thenable to a Promise for parallel awaiting.
+      updates.push(p as unknown as Promise<unknown>);
       // Batch to avoid too many parallel HTTP calls
       if (updates.length >= 25) {
         await Promise.all(updates.splice(0, updates.length));
