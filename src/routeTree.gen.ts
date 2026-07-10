@@ -18,6 +18,7 @@ import { Route as AuthenticatedAppEmployeesRouteImport } from './routes/_authent
 import { Route as AuthenticatedAppSessionsIndexRouteImport } from './routes/_authenticated/app.sessions.index'
 import { Route as AuthenticatedAppSessionsNewRouteImport } from './routes/_authenticated/app.sessions.new'
 import { Route as AuthenticatedAppSessionsIdRouteImport } from './routes/_authenticated/app.sessions.$id'
+import { Route as AuthenticatedAppCountIdRouteImport } from './routes/_authenticated/app.count.$id'
 import { Route as AuthenticatedAppSessionsIdImportRouteImport } from './routes/_authenticated/app.sessions.$id.import'
 
 const AuthRoute = AuthRouteImport.update({
@@ -68,6 +69,11 @@ const AuthenticatedAppSessionsIdRoute =
     path: '/sessions/$id',
     getParentRoute: () => AuthenticatedAppRoute,
   } as any)
+const AuthenticatedAppCountIdRoute = AuthenticatedAppCountIdRouteImport.update({
+  id: '/count/$id',
+  path: '/count/$id',
+  getParentRoute: () => AuthenticatedAppRoute,
+} as any)
 const AuthenticatedAppSessionsIdImportRoute =
   AuthenticatedAppSessionsIdImportRouteImport.update({
     id: '/import',
@@ -81,6 +87,7 @@ export interface FileRoutesByFullPath {
   '/app': typeof AuthenticatedAppRouteWithChildren
   '/app/employees': typeof AuthenticatedAppEmployeesRoute
   '/app/': typeof AuthenticatedAppIndexRoute
+  '/app/count/$id': typeof AuthenticatedAppCountIdRoute
   '/app/sessions/$id': typeof AuthenticatedAppSessionsIdRouteWithChildren
   '/app/sessions/new': typeof AuthenticatedAppSessionsNewRoute
   '/app/sessions/': typeof AuthenticatedAppSessionsIndexRoute
@@ -91,6 +98,7 @@ export interface FileRoutesByTo {
   '/auth': typeof AuthRoute
   '/app/employees': typeof AuthenticatedAppEmployeesRoute
   '/app': typeof AuthenticatedAppIndexRoute
+  '/app/count/$id': typeof AuthenticatedAppCountIdRoute
   '/app/sessions/$id': typeof AuthenticatedAppSessionsIdRouteWithChildren
   '/app/sessions/new': typeof AuthenticatedAppSessionsNewRoute
   '/app/sessions': typeof AuthenticatedAppSessionsIndexRoute
@@ -104,6 +112,7 @@ export interface FileRoutesById {
   '/_authenticated/app': typeof AuthenticatedAppRouteWithChildren
   '/_authenticated/app/employees': typeof AuthenticatedAppEmployeesRoute
   '/_authenticated/app/': typeof AuthenticatedAppIndexRoute
+  '/_authenticated/app/count/$id': typeof AuthenticatedAppCountIdRoute
   '/_authenticated/app/sessions/$id': typeof AuthenticatedAppSessionsIdRouteWithChildren
   '/_authenticated/app/sessions/new': typeof AuthenticatedAppSessionsNewRoute
   '/_authenticated/app/sessions/': typeof AuthenticatedAppSessionsIndexRoute
@@ -117,6 +126,7 @@ export interface FileRouteTypes {
     | '/app'
     | '/app/employees'
     | '/app/'
+    | '/app/count/$id'
     | '/app/sessions/$id'
     | '/app/sessions/new'
     | '/app/sessions/'
@@ -127,6 +137,7 @@ export interface FileRouteTypes {
     | '/auth'
     | '/app/employees'
     | '/app'
+    | '/app/count/$id'
     | '/app/sessions/$id'
     | '/app/sessions/new'
     | '/app/sessions'
@@ -139,6 +150,7 @@ export interface FileRouteTypes {
     | '/_authenticated/app'
     | '/_authenticated/app/employees'
     | '/_authenticated/app/'
+    | '/_authenticated/app/count/$id'
     | '/_authenticated/app/sessions/$id'
     | '/_authenticated/app/sessions/new'
     | '/_authenticated/app/sessions/'
@@ -216,6 +228,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedAppSessionsIdRouteImport
       parentRoute: typeof AuthenticatedAppRoute
     }
+    '/_authenticated/app/count/$id': {
+      id: '/_authenticated/app/count/$id'
+      path: '/count/$id'
+      fullPath: '/app/count/$id'
+      preLoaderRoute: typeof AuthenticatedAppCountIdRouteImport
+      parentRoute: typeof AuthenticatedAppRoute
+    }
     '/_authenticated/app/sessions/$id/import': {
       id: '/_authenticated/app/sessions/$id/import'
       path: '/import'
@@ -244,6 +263,7 @@ const AuthenticatedAppSessionsIdRouteWithChildren =
 interface AuthenticatedAppRouteChildren {
   AuthenticatedAppEmployeesRoute: typeof AuthenticatedAppEmployeesRoute
   AuthenticatedAppIndexRoute: typeof AuthenticatedAppIndexRoute
+  AuthenticatedAppCountIdRoute: typeof AuthenticatedAppCountIdRoute
   AuthenticatedAppSessionsIdRoute: typeof AuthenticatedAppSessionsIdRouteWithChildren
   AuthenticatedAppSessionsNewRoute: typeof AuthenticatedAppSessionsNewRoute
   AuthenticatedAppSessionsIndexRoute: typeof AuthenticatedAppSessionsIndexRoute
@@ -252,6 +272,7 @@ interface AuthenticatedAppRouteChildren {
 const AuthenticatedAppRouteChildren: AuthenticatedAppRouteChildren = {
   AuthenticatedAppEmployeesRoute: AuthenticatedAppEmployeesRoute,
   AuthenticatedAppIndexRoute: AuthenticatedAppIndexRoute,
+  AuthenticatedAppCountIdRoute: AuthenticatedAppCountIdRoute,
   AuthenticatedAppSessionsIdRoute: AuthenticatedAppSessionsIdRouteWithChildren,
   AuthenticatedAppSessionsNewRoute: AuthenticatedAppSessionsNewRoute,
   AuthenticatedAppSessionsIndexRoute: AuthenticatedAppSessionsIndexRoute,
