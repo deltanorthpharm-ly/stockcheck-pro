@@ -14,6 +14,7 @@ import { Route as AuthenticatedRouteRouteImport } from './routes/_authenticated/
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AuthenticatedAppRouteImport } from './routes/_authenticated/app'
 import { Route as AuthenticatedAppIndexRouteImport } from './routes/_authenticated/app.index'
+import { Route as AuthenticatedAppSessionsIndexRouteImport } from './routes/_authenticated/app.sessions.index'
 import { Route as AuthenticatedAppSessionsNewRouteImport } from './routes/_authenticated/app.sessions.new'
 import { Route as AuthenticatedAppSessionsIdRouteImport } from './routes/_authenticated/app.sessions.$id'
 import { Route as AuthenticatedAppSessionsIdImportRouteImport } from './routes/_authenticated/app.sessions.$id.import'
@@ -42,6 +43,12 @@ const AuthenticatedAppIndexRoute = AuthenticatedAppIndexRouteImport.update({
   path: '/',
   getParentRoute: () => AuthenticatedAppRoute,
 } as any)
+const AuthenticatedAppSessionsIndexRoute =
+  AuthenticatedAppSessionsIndexRouteImport.update({
+    id: '/sessions/',
+    path: '/sessions/',
+    getParentRoute: () => AuthenticatedAppRoute,
+  } as any)
 const AuthenticatedAppSessionsNewRoute =
   AuthenticatedAppSessionsNewRouteImport.update({
     id: '/sessions/new',
@@ -68,6 +75,7 @@ export interface FileRoutesByFullPath {
   '/app/': typeof AuthenticatedAppIndexRoute
   '/app/sessions/$id': typeof AuthenticatedAppSessionsIdRouteWithChildren
   '/app/sessions/new': typeof AuthenticatedAppSessionsNewRoute
+  '/app/sessions/': typeof AuthenticatedAppSessionsIndexRoute
   '/app/sessions/$id/import': typeof AuthenticatedAppSessionsIdImportRoute
 }
 export interface FileRoutesByTo {
@@ -76,6 +84,7 @@ export interface FileRoutesByTo {
   '/app': typeof AuthenticatedAppIndexRoute
   '/app/sessions/$id': typeof AuthenticatedAppSessionsIdRouteWithChildren
   '/app/sessions/new': typeof AuthenticatedAppSessionsNewRoute
+  '/app/sessions': typeof AuthenticatedAppSessionsIndexRoute
   '/app/sessions/$id/import': typeof AuthenticatedAppSessionsIdImportRoute
 }
 export interface FileRoutesById {
@@ -87,6 +96,7 @@ export interface FileRoutesById {
   '/_authenticated/app/': typeof AuthenticatedAppIndexRoute
   '/_authenticated/app/sessions/$id': typeof AuthenticatedAppSessionsIdRouteWithChildren
   '/_authenticated/app/sessions/new': typeof AuthenticatedAppSessionsNewRoute
+  '/_authenticated/app/sessions/': typeof AuthenticatedAppSessionsIndexRoute
   '/_authenticated/app/sessions/$id/import': typeof AuthenticatedAppSessionsIdImportRoute
 }
 export interface FileRouteTypes {
@@ -98,6 +108,7 @@ export interface FileRouteTypes {
     | '/app/'
     | '/app/sessions/$id'
     | '/app/sessions/new'
+    | '/app/sessions/'
     | '/app/sessions/$id/import'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -106,6 +117,7 @@ export interface FileRouteTypes {
     | '/app'
     | '/app/sessions/$id'
     | '/app/sessions/new'
+    | '/app/sessions'
     | '/app/sessions/$id/import'
   id:
     | '__root__'
@@ -116,6 +128,7 @@ export interface FileRouteTypes {
     | '/_authenticated/app/'
     | '/_authenticated/app/sessions/$id'
     | '/_authenticated/app/sessions/new'
+    | '/_authenticated/app/sessions/'
     | '/_authenticated/app/sessions/$id/import'
   fileRoutesById: FileRoutesById
 }
@@ -162,6 +175,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedAppIndexRouteImport
       parentRoute: typeof AuthenticatedAppRoute
     }
+    '/_authenticated/app/sessions/': {
+      id: '/_authenticated/app/sessions/'
+      path: '/sessions'
+      fullPath: '/app/sessions/'
+      preLoaderRoute: typeof AuthenticatedAppSessionsIndexRouteImport
+      parentRoute: typeof AuthenticatedAppRoute
+    }
     '/_authenticated/app/sessions/new': {
       id: '/_authenticated/app/sessions/new'
       path: '/sessions/new'
@@ -205,12 +225,14 @@ interface AuthenticatedAppRouteChildren {
   AuthenticatedAppIndexRoute: typeof AuthenticatedAppIndexRoute
   AuthenticatedAppSessionsIdRoute: typeof AuthenticatedAppSessionsIdRouteWithChildren
   AuthenticatedAppSessionsNewRoute: typeof AuthenticatedAppSessionsNewRoute
+  AuthenticatedAppSessionsIndexRoute: typeof AuthenticatedAppSessionsIndexRoute
 }
 
 const AuthenticatedAppRouteChildren: AuthenticatedAppRouteChildren = {
   AuthenticatedAppIndexRoute: AuthenticatedAppIndexRoute,
   AuthenticatedAppSessionsIdRoute: AuthenticatedAppSessionsIdRouteWithChildren,
   AuthenticatedAppSessionsNewRoute: AuthenticatedAppSessionsNewRoute,
+  AuthenticatedAppSessionsIndexRoute: AuthenticatedAppSessionsIndexRoute,
 }
 
 const AuthenticatedAppRouteWithChildren =
