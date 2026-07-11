@@ -95,16 +95,18 @@ export const listEmployees = createServerFn({ method: "GET" })
       _role: "admin",
     });
     if (!isAdmin) throw new Error("Forbidden");
+    const { data: roleRows, error: rErr } = await context.supabase
+      .from("user_roles")
+      .select("user_id")
+      .eq("role", "employee");
+    if (rErr) throw new Error(rErr.message);
+    const ids = (roleRows ?? []).map((r) => r.user_id);
+    if (ids.length === 0) return [];
     const { data, error } = await context.supabase
       .from("profiles")
-      .select("id, username, display_name, created_at, user_roles!inner(role)")
-      .eq("user_roles.role", "employee")
+      .select("id, username, display_name, created_at")
+      .in("id", ids)
       .order("created_at", { ascending: false });
     if (error) throw new Error(error.message);
-    return (data ?? []).map((p) => ({
-      id: p.id,
-      username: p.username,
-      display_name: p.display_name,
-      created_at: p.created_at,
-    }));
+    return data ?? [];
   });
