@@ -172,6 +172,7 @@ export type Database = {
           created_by: string | null
           display_name: string
           id: string
+          pin: string | null
           username: string
         }
         Insert: {
@@ -179,6 +180,7 @@ export type Database = {
           created_by?: string | null
           display_name: string
           id: string
+          pin?: string | null
           username: string
         }
         Update: {
@@ -186,6 +188,7 @@ export type Database = {
           created_by?: string | null
           display_name?: string
           id?: string
+          pin?: string | null
           username?: string
         }
         Relationships: []
