@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
-import { KeyRound, UserPlus } from "lucide-react";
+import { KeyRound, UserPlus, Eye, EyeOff } from "lucide-react";
 
 export const Route = createFileRoute("/_authenticated/app/employees")({
   component: EmployeesPage,
@@ -28,6 +28,7 @@ function EmployeesPage() {
   const [username, setUsername] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [pin, setPin] = useState(randomPin());
+  const [revealed, setRevealed] = useState<Record<string, boolean>>({});
 
   const create = useMutation({
     mutationFn: () =>
@@ -103,29 +104,83 @@ function EmployeesPage() {
 
       <div className="space-y-2">
         {emps.map((e) => (
-          <Card key={e.id} className="p-3 flex items-center justify-between gap-2">
-            <div className="min-w-0">
-              <div className="font-medium truncate">{e.display_name}</div>
-              <div className="text-xs text-muted-foreground">@{e.username}</div>
+          <Card key={e.id} className="p-3 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="font-medium truncate">{e.display_name}</div>
+                <div className="text-xs text-muted-foreground">@{e.username}</div>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-10 shrink-0"
+                onClick={() => {
+                  const p = randomPin();
+                  if (confirm(`إعادة تعيين رقم سري جديد للموظف: ${p}؟`)) {
+                    resetFn({ data: { user_id: e.id, pin: p } })
+                      .then(() => {
+                        toast.success(`رقم سري جديد: ${p}`, { duration: 15000 });
+                        qc.invalidateQueries({ queryKey: ["employees"] });
+                      })
+                      .catch((err: Error) => toast.error(err.message));
+                  }
+                }}
+              >
+                <KeyRound className="size-4 ms-1" /> إعادة تعيين
+              </Button>
             </div>
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-10 shrink-0"
-              onClick={() => {
-                const p = randomPin();
-                if (confirm(`إعادة تعيين رقم سري جديد للموظف: ${p}؟`)) {
-                  resetFn({ data: { user_id: e.id, pin: p } })
-                    .then(() => toast.success(`رقم سري جديد: ${p}`, { duration: 15000 }))
-                    .catch((err: Error) => toast.error(err.message));
-                }
-              }}
-            >
-              <KeyRound className="size-4 ms-1" /> إعادة تعيين
-            </Button>
+
+            <div className="flex items-center justify-between gap-2 rounded-md bg-muted/50 p-2">
+              <div className="text-xs text-muted-foreground">الرقم السري</div>
+              <div className="flex items-center gap-2">
+                <div dir="ltr" className="font-mono tracking-widest text-sm">
+                  {e.pin ? (revealed[e.id] ? e.pin : "••••••") : "—"}
+                </div>
+                {e.pin && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 w-8 p-0"
+                    onClick={() => setRevealed((r) => ({ ...r, [e.id]: !r[e.id] }))}
+                  >
+                    {revealed[e.id] ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                  </Button>
+                )}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-3 gap-2 text-center">
+              <PerfCell label="جلسات" value={e.sessions ?? 0} />
+              <PerfCell label="عُدَّت" value={e.counted ?? 0} />
+              <PerfCell label="معتمَد" value={e.approved ?? 0} tone="success" />
+            </div>
           </Card>
         ))}
+        {emps.length === 0 && (
+          <div className="text-sm text-muted-foreground text-center py-6">
+            لا يوجد موظفون بعد.
+          </div>
+        )}
       </div>
+    </div>
+  );
+}
+
+function PerfCell({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: number;
+  tone?: "success";
+}) {
+  return (
+    <div className="rounded-md border p-2">
+      <div className={`text-lg font-bold ${tone === "success" ? "text-success" : ""}`}>
+        {value.toLocaleString("ar")}
+      </div>
+      <div className="text-[10px] text-muted-foreground">{label}</div>
     </div>
   );
 }
