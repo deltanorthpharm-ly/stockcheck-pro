@@ -58,6 +58,7 @@ export const createEmployee = createServerFn({ method: "POST" })
       id: uid,
       username: data.username,
       display_name: data.display_name,
+      pin: data.pin,
       created_by: context.userId,
     });
     if (pErr) throw new Error(pErr.message);
@@ -84,6 +85,7 @@ export const resetEmployeePin = createServerFn({ method: "POST" })
       password: data.pin,
     });
     if (error) throw new Error(error.message);
+    await supabaseAdmin.from("profiles").update({ pin: data.pin }).eq("id", data.user_id);
     return { ok: true };
   });
 
@@ -104,9 +106,37 @@ export const listEmployees = createServerFn({ method: "GET" })
     if (ids.length === 0) return [];
     const { data, error } = await context.supabase
       .from("profiles")
-      .select("id, username, display_name, created_at")
+      .select("id, username, display_name, pin, created_at")
       .in("id", ids)
       .order("created_at", { ascending: false });
     if (error) throw new Error(error.message);
-    return data ?? [];
+    const profiles = data ?? [];
+
+    // Performance: counts + approved counts + sessions participated per user
+    const { data: countRows } = await context.supabase
+      .from("inventory_counts")
+      .select("counted_by, status, is_current, session_id")
+      .in("counted_by", ids)
+      .eq("is_current", true);
+    const stats = new Map<
+      string,
+      { counted: number; approved: number; sessions: Set<string> }
+    >();
+    for (const id of ids) stats.set(id, { counted: 0, approved: 0, sessions: new Set() });
+    for (const r of countRows ?? []) {
+      const s = stats.get(r.counted_by as string);
+      if (!s) continue;
+      s.counted += 1;
+      if (r.status === "approved") s.approved += 1;
+      if (r.session_id) s.sessions.add(r.session_id as string);
+    }
+    return profiles.map((p) => {
+      const s = stats.get(p.id)!;
+      return {
+        ...p,
+        counted: s.counted,
+        approved: s.approved,
+        sessions: s.sessions.size,
+      };
+    });
   });
