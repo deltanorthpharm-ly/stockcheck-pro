@@ -20,7 +20,7 @@ import { Upload, Lock, Users, FileDown, BarChart3, ClipboardList } from "lucide-
 import { exportRowsToXlsx } from "@/lib/excel-import";
 import { formatQtyArabic } from "@/lib/quantity-parser";
 
-export const Route = createFileRoute("/_authenticated/app/sessions/$id")({
+export const Route = createFileRoute("/_authenticated/app/sessions/$id/")({
   component: SessionDetail,
 });
 
