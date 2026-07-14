@@ -5,6 +5,7 @@ import { listSessions } from "@/lib/sessions.functions";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Plus, Package, CheckCircle2, Lock } from "lucide-react";
+import { TeryaqHealthCard } from "./teryaq-health-card";
 
 export function AdminHome() {
   const list = useServerFn(listSessions);
@@ -30,6 +31,8 @@ export function AdminHome() {
         <StatCard label="جرود مفتوحة" value={open.length} icon={<Package className="size-5" />} tone="primary" />
         <StatCard label="جرود مغلقة" value={closed.length} icon={<Lock className="size-5" />} tone="muted" />
       </div>
+
+      <TeryaqHealthCard />
 
       <div>
         <h3 className="text-sm font-semibold text-muted-foreground mb-2">آخر الجرود</h3>
