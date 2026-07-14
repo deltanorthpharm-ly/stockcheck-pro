@@ -20,14 +20,33 @@ export type Database = {
           count_version: number
           counted_by: string
           created_at: string
+          diff_status: string | null
+          difference_boxes: number | null
+          difference_raw: number | null
+          difference_units: number | null
           id: string
           is_current: boolean
           item_id: string
+          opened_at: string | null
+          pack_size_at_open: number | null
+          pack_size_at_submit: number | null
           phys_boxes: number
           phys_strips: number
           phys_units: number
+          physical_raw_quantity: number | null
+          raw_quantity_at_open: number | null
+          raw_quantity_at_submit: number | null
+          recount_reason: string | null
+          requires_recount: boolean
           session_id: string
+          source_read_at_open: string | null
+          source_read_at_submit: string | null
           status: string
+          submitted_at: string | null
+          system_boxes_at_open: number | null
+          system_boxes_at_submit: number | null
+          system_units_at_open: number | null
+          system_units_at_submit: number | null
           updated_at: string
         }
         Insert: {
@@ -35,14 +54,33 @@ export type Database = {
           count_version?: number
           counted_by: string
           created_at?: string
+          diff_status?: string | null
+          difference_boxes?: number | null
+          difference_raw?: number | null
+          difference_units?: number | null
           id?: string
           is_current?: boolean
           item_id: string
+          opened_at?: string | null
+          pack_size_at_open?: number | null
+          pack_size_at_submit?: number | null
           phys_boxes?: number
           phys_strips?: number
           phys_units?: number
+          physical_raw_quantity?: number | null
+          raw_quantity_at_open?: number | null
+          raw_quantity_at_submit?: number | null
+          recount_reason?: string | null
+          requires_recount?: boolean
           session_id: string
+          source_read_at_open?: string | null
+          source_read_at_submit?: string | null
           status?: string
+          submitted_at?: string | null
+          system_boxes_at_open?: number | null
+          system_boxes_at_submit?: number | null
+          system_units_at_open?: number | null
+          system_units_at_submit?: number | null
           updated_at?: string
         }
         Update: {
@@ -50,14 +88,33 @@ export type Database = {
           count_version?: number
           counted_by?: string
           created_at?: string
+          diff_status?: string | null
+          difference_boxes?: number | null
+          difference_raw?: number | null
+          difference_units?: number | null
           id?: string
           is_current?: boolean
           item_id?: string
+          opened_at?: string | null
+          pack_size_at_open?: number | null
+          pack_size_at_submit?: number | null
           phys_boxes?: number
           phys_strips?: number
           phys_units?: number
+          physical_raw_quantity?: number | null
+          raw_quantity_at_open?: number | null
+          raw_quantity_at_submit?: number | null
+          recount_reason?: string | null
+          requires_recount?: boolean
           session_id?: string
+          source_read_at_open?: string | null
+          source_read_at_submit?: string | null
           status?: string
+          submitted_at?: string | null
+          system_boxes_at_open?: number | null
+          system_boxes_at_submit?: number | null
+          system_units_at_open?: number | null
+          system_units_at_submit?: number | null
           updated_at?: string
         }
         Relationships: [
@@ -81,50 +138,74 @@ export type Database = {
         Row: {
           assigned_to: string | null
           barcode: string | null
+          conversion_status: string | null
           created_at: string
           expiry_date: string | null
+          external_item_id: string | null
+          formatted_quantity_snapshot: string | null
           id: string
           item_name_raw: string
+          pack_size: number | null
           quantity_parse_status: string
+          raw_quantity_snapshot: number | null
           row_index: number
           selling_price: number | null
           session_id: string
+          source_read_at: string | null
           system_boxes: number
+          system_boxes_snapshot: number | null
           system_quantity_raw: string | null
           system_strips: number
           system_units: number
+          system_units_snapshot: number | null
         }
         Insert: {
           assigned_to?: string | null
           barcode?: string | null
+          conversion_status?: string | null
           created_at?: string
           expiry_date?: string | null
+          external_item_id?: string | null
+          formatted_quantity_snapshot?: string | null
           id?: string
           item_name_raw: string
+          pack_size?: number | null
           quantity_parse_status?: string
+          raw_quantity_snapshot?: number | null
           row_index: number
           selling_price?: number | null
           session_id: string
+          source_read_at?: string | null
           system_boxes?: number
+          system_boxes_snapshot?: number | null
           system_quantity_raw?: string | null
           system_strips?: number
           system_units?: number
+          system_units_snapshot?: number | null
         }
         Update: {
           assigned_to?: string | null
           barcode?: string | null
+          conversion_status?: string | null
           created_at?: string
           expiry_date?: string | null
+          external_item_id?: string | null
+          formatted_quantity_snapshot?: string | null
           id?: string
           item_name_raw?: string
+          pack_size?: number | null
           quantity_parse_status?: string
+          raw_quantity_snapshot?: number | null
           row_index?: number
           selling_price?: number | null
           session_id?: string
+          source_read_at?: string | null
           system_boxes?: number
+          system_boxes_snapshot?: number | null
           system_quantity_raw?: string | null
           system_strips?: number
           system_units?: number
+          system_units_snapshot?: number | null
         }
         Relationships: [
           {
@@ -144,6 +225,7 @@ export type Database = {
           exported_at: string | null
           id: string
           name: string
+          source_type: string
           status: string
         }
         Insert: {
@@ -153,6 +235,7 @@ export type Database = {
           exported_at?: string | null
           id?: string
           name: string
+          source_type?: string
           status?: string
         }
         Update: {
@@ -162,6 +245,7 @@ export type Database = {
           exported_at?: string | null
           id?: string
           name?: string
+          source_type?: string
           status?: string
         }
         Relationships: []
@@ -192,6 +276,77 @@ export type Database = {
           username?: string
         }
         Relationships: []
+      }
+      teryaq_health_pings: {
+        Row: {
+          checked_at: string
+          checked_by: string | null
+          error: string | null
+          id: string
+          latency_ms: number | null
+          ok: boolean
+        }
+        Insert: {
+          checked_at?: string
+          checked_by?: string | null
+          error?: string | null
+          id?: string
+          latency_ms?: number | null
+          ok: boolean
+        }
+        Update: {
+          checked_at?: string
+          checked_by?: string | null
+          error?: string | null
+          id?: string
+          latency_ms?: number | null
+          ok?: boolean
+        }
+        Relationships: []
+      }
+      teryaq_sync_runs: {
+        Row: {
+          error: string | null
+          finished_at: string | null
+          id: string
+          items_synced: number
+          page_cursor: number
+          session_id: string
+          started_at: string
+          started_by: string
+          status: string
+        }
+        Insert: {
+          error?: string | null
+          finished_at?: string | null
+          id?: string
+          items_synced?: number
+          page_cursor?: number
+          session_id: string
+          started_at?: string
+          started_by: string
+          status: string
+        }
+        Update: {
+          error?: string | null
+          finished_at?: string | null
+          id?: string
+          items_synced?: number
+          page_cursor?: number
+          session_id?: string
+          started_at?: string
+          started_by?: string
+          status?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "teryaq_sync_runs_session_id_fkey"
+            columns: ["session_id"]
+            isOneToOne: false
+            referencedRelation: "inventory_sessions"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       user_roles: {
         Row: {
