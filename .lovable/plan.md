@@ -1,158 +1,248 @@
-# StockCount Pro — Build Plan
 
-## 1. Foundation
+# ربط StockCount Pro بـ Teryaq — خطة معتمدة مع التعديلات الإلزامية
 
-- Enable **Lovable Cloud** (Supabase) for auth, DB, storage.
-- RTL setup: `<html dir="rtl" lang="ar">`, Cairo font via Google Fonts `<link>` in `__root.tsx`.
-- Theme tokens in `src/styles.css`: white bg, teal primary (`oklch` values), min touch target 48px utility, large Arabic type scale.
-- **PWA (manifest-only)**: `public/manifest.webmanifest`, icons, theme color, `display: standalone`. No service worker for offline yet — see §8.
+## المبدأ العام (بلا تغيير)
 
-## 2. Auth (username + PIN)
+`App → Supabase Edge Function (teryaq-stockcount-proxy) → Teryaq StockCount API`
+لا مفاتيح في المتصفح، لا اتصال مباشر، لا تعديل تصميم عام.
+Excel يبقى fallback، ولا يُحذَف.
 
-- Supabase Auth doesn't support username/PIN natively → use **synthetic emails**: `{username}@stockcount.local`, PIN = password (6 digits, enforced).
-- Login screen: username + PIN inputs only.
-- `user_roles` table with enum `app_role` (`admin`, `employee`) + `has_role()` SECURITY DEFINER function (per user-roles knowledge).
-- `profiles` table: `id`, `username`, `display_name`, `created_by`.
-- Admin screen to create employees (generates synthetic email + PIN via service-role server fn).
-- Protected routes under `src/routes/_authenticated/`; admin-only routes under `_authenticated/_admin/`.
+## تنفيذ على مراحل — نتوقف بعد كل مرحلة
 
-## 3. Database schema
+### ✅ المرحلة 1 (الآن — سنبدأ بها فقط)
+Edge Function + health + مزامنة تجريبية (10 أصناف) + شاشة عد مبسّطة + منع اعتماد عند تغيّر الرصيد + تقرير فروقات بسيط.
 
-- `inventory_sessions` — `id`, `name`, `status` (`open`/`closed`), `created_by`, `created_at`, `closed_at`.
-- `inventory_items` — `id`, `session_id`, `row_index` (Excel row order), `item_name` (raw Arabic), `barcode` (text), `selling_price` (numeric), `expiry_date` (text — keep as-is), `system_quantity_raw` (original Arabic string), `system_boxes`, `system_strips`, `system_pieces` (parsed ints).
-- `inventory_counts` — `id`, `item_id`, `session_id`, `counted_by`, `phys_boxes`, `phys_strips`, `phys_pieces`, `counted_at`. Unique on `(item_id)` (last save wins per assigned employee; range assignment prevents collisions).
-- `inventory_assignments` — `id`, `session_id`, `employee_id`, `row_start`, `row_end`. An item belongs to the employee whose range contains its `row_index`.
-- `inventory_reports` — cached export metadata (optional).
-- RLS: admin full access via `has_role`; employees see only their assigned session's items and can only insert/update counts for items in their assigned row range.
-- GRANTs to `authenticated` and `service_role` on every public table.
+### ⏸ المرحلة 2 (بعد نجاح 1)
+توزيع الموظفين، لوحة تقدم، سجل تعديلات (audit)، تقارير متقدمة.
 
-## 4. Excel import (admin)
+### ⏸ المرحلة 3 (بعد نجاح 2)
+Offline كامل: IndexedDB + sync queue + client_operation_id + device sync status.
+**لن نلمس Offline في المرحلة 1 أو 2.**
 
-- Library: `xlsx` (SheetJS).
-- Header mapping (Arabic → field): `الصنف→item_name`, `الباركود→barcode`, `سعر البيع→selling_price`, `الصلاحية→expiry_date`, `الكمية المعروضة→system_quantity_raw`.
-- **Configurable mapping UI**: after file selection, show detected headers with dropdowns to map each to a known field; unknown columns ignored. Persist mapping per session for re-imports.
-- Barcode always parsed as string (preserve leading zeros — read cells with `{raw:false}` or force string).
-- Arabic quantity parser: extract integers preceding `علبة` (box), `شريط` (strip), `وحدة` (piece). Examples: `"40 علبة و1 وحدة"` → `{boxes:40, strips:0, pieces:1}`, `"13 وحدة"` → `{0,0,13}`. Preserve original string for report display.
-- Bulk insert via server fn (chunked, ~500 rows/req) to handle 10k+ items.
+---
 
-## 5. Admin flows
+## المرحلة 1 — التفاصيل
 
-- Sessions list + "Create session" → name input, then upload Excel.
-- Session detail: item count, progress %, employees assigned, "Assign ranges" screen (split by row ranges, quick "auto-split evenly across N employees" button).
-- Live progress dashboard (cards): total / counted / remaining / matched / shortage / excess / completion %.
-- Reports view with tabs: matched, shortage, excess, uncounted, summary.
-- Export: **Excel** (`xlsx`) and **PDF** (`jspdf` + `jspdf-autotable` with Cairo font embedded for Arabic).
-- Close session (locks further counts).
+### 1) Migration SQL (نهائية)
 
-## 6. Employee flows
+**`inventory_sessions`** — إضافة مصدر الجلسة:
+```sql
+alter table public.inventory_sessions
+  add column source_type text not null default 'excel_import'
+    check (source_type in ('live_api','excel_import'));
+```
+> الافتراضي = `excel_import`. يتحوّل إلى `live_api` فقط بعد نجاح `/health` (بند 13).
 
-- Home: list of open sessions where they have an assignment.
-- Counting screen:
-  - Sticky RTL search bar (instant client-side filter over their assigned items by item_name substring; barcode field indexed for future).
-  - Item list: name + system qty (Arabic string) + status chip.
-  - Tap item → count sheet: 3 large numeric inputs (boxes / strips / pieces), auto-computed difference per unit shown live with color (red shortage / green match / blue excess), sticky Save button.
-  - Autosave on blur + explicit Save; no manual difference field.
+**`inventory_items`** — snapshot لحظة السحب:
+```sql
+alter table public.inventory_items
+  add column external_item_id text,
+  add column pack_size integer,
+  add column raw_quantity_snapshot numeric,
+  add column system_boxes_snapshot integer,
+  add column system_units_snapshot integer,
+  add column formatted_quantity_snapshot text,
+  add column conversion_status text
+    check (conversion_status in ('ok','missing_pack_size','negative_stock','unavailable')),
+  add column source_read_at timestamptz;
 
-## 7. UI/UX
+create unique index inventory_items_session_ext_uidx
+  on public.inventory_items(session_id, external_item_id)
+  where external_item_id is not null;
+```
+> بند 7: القيد الفريد شرطي فقط عندما `external_item_id IS NOT NULL`.
 
-- Bottom nav (RTL-mirrored): Home / Search / Progress / Profile.
-- 48px min touch targets, `text-lg`+ everywhere, no unnecessary transitions.
-- Loading states with skeletons, not spinners, for perceived speed.
-- Virtualized list (`@tanstack/react-virtual`) for 10k items.
+**`inventory_counts`** — snapshot الفتح/الاعتماد + منع اعتماد عند تغيّر الرصيد:
+```sql
+alter table public.inventory_counts
+  add column raw_quantity_at_open numeric,
+  add column pack_size_at_open integer,
+  add column system_boxes_at_open integer,
+  add column system_units_at_open integer,
+  add column opened_at timestamptz,
+  add column source_read_at_open timestamptz,
 
-## 8. Offline + sync
+  add column raw_quantity_at_submit numeric,
+  add column pack_size_at_submit integer,
+  add column system_boxes_at_submit integer,
+  add column system_units_at_submit integer,
+  add column submitted_at timestamptz,
+  add column source_read_at_submit timestamptz,
 
-- Local queue: IndexedDB (via `idb`) stores pending count writes when offline.
-- On app load and on `online` event, drain queue → server fn upsert.
-- Read-side: items for the employee's assignment cached in IndexedDB on session open so search works offline.
-- Skip service worker (per PWA guidance, manifest-only) — offline uses IndexedDB in the running tab; user keeps the PWA open during counting.
+  add column physical_raw_quantity numeric,
+  add column difference_raw numeric,
+  add column difference_boxes integer,
+  add column difference_units integer,
+  add column diff_status text
+    check (diff_status in ('match','shortage','excess','negative_stock','conversion_unavailable')),
 
-## Technical notes
+  add column requires_recount boolean not null default false,
+  add column recount_reason text;
+```
+> **بند 1:** إذا `raw_quantity_at_submit ≠ raw_quantity_at_open` أو `pack_size_at_submit ≠ pack_size_at_open` → لا يُحسب الفرق، ويُحفظ `requires_recount=true` مع سبب (`stock_changed` / `pack_size_changed`).
+>
+> **بند 12:** نبقي `count_version` و`is_current` الموجودَين — لا last-save-wins؛ أي اعتماد جديد ينشئ نسخة جديدة ويقلب القديمة إلى `is_current=false` (لا حذف).
 
-- Server fns in `src/lib/*.functions.ts` using `requireSupabaseAuth`; admin ops (create employee, bulk import) verify `has_role(admin)` inside handler and dynamic-import `client.server`.
-- Head metadata in `__root.tsx`: title "StockCount Pro — جرد الصيدلية", Arabic description.
-- Deps to add: `xlsx`, `jspdf`, `jspdf-autotable`, `idb`, `@tanstack/react-virtual`.
+**جدول تقدم المزامنة (بند 11):**
+```sql
+create table public.teryaq_sync_runs (
+  id uuid primary key default gen_random_uuid(),
+  session_id uuid not null references public.inventory_sessions(id) on delete cascade,
+  started_by uuid not null,
+  status text not null check (status in ('running','succeeded','failed','cancelled')),
+  page_cursor integer not null default 0,
+  items_synced integer not null default 0,
+  error text,
+  started_at timestamptz not null default now(),
+  finished_at timestamptz
+);
+create unique index teryaq_sync_runs_one_running
+  on public.teryaq_sync_runs(session_id)
+  where status = 'running';
 
-## Out of scope (per spec)
+grant select, insert, update on public.teryaq_sync_runs to authenticated;
+grant all on public.teryaq_sync_runs to service_role;
 
-Barcode scanner, SQL Server integration, live stock, multi-branch, batch/expiry tracking beyond raw field, AI analysis.
+alter table public.teryaq_sync_runs enable row level security;
 
-&nbsp;
+create policy "admins manage sync runs"
+  on public.teryaq_sync_runs for all
+  to authenticated
+  using (public.has_role(auth.uid(),'admin'))
+  with check (public.has_role(auth.uid(),'admin'));
+```
+> الفهرس الفريد الجزئي = منع تشغيل مزامنتين متوازيتين لنفس الجلسة.
 
-Critical corrections before implementation:
+**جدول حالة الاتصال بـ Teryaq (لواجهة المدير + بند 13):**
+```sql
+create table public.teryaq_health_pings (
+  id uuid primary key default gen_random_uuid(),
+  ok boolean not null,
+  latency_ms integer,
+  error text,
+  checked_by uuid,
+  checked_at timestamptz not null default now()
+);
+grant select, insert on public.teryaq_health_pings to authenticated;
+grant all on public.teryaq_health_pings to service_role;
+alter table public.teryaq_health_pings enable row level security;
+create policy "admins read health" on public.teryaq_health_pings
+  for select to authenticated using (public.has_role(auth.uid(),'admin'));
+create policy "admins write health" on public.teryaq_health_pings
+  for insert to authenticated with check (public.has_role(auth.uid(),'admin'));
+```
 
-&nbsp;
+### 2) Edge Function `teryaq-stockcount-proxy`
 
-1. The pharmacy remains open while counting. The imported Excel quantity is a snapshot, not live stock. Add exported_at to every inventory session and clearly label all differences as calculated against the imported snapshot.
+الملف: `supabase/functions/teryaq-stockcount-proxy/index.ts`
+`verify_jwt = true`.
 
-&nbsp;
+**الأسرار (سيضيفها المستخدم بعد اعتماد الخطة):**
+- `TERYAQ_STOCKCOUNT_BASE_URL` (HTTPS عام فقط — لا `localhost` ولا `192.168.x.x`؛ يُرفض عند تشغيل الدالة).
+- `TERYAQ_STOCKCOUNT_API_KEY`.
 
-2. Preserve item names exactly:
+**المسارات المسموح بها فقط (whitelist):**
 
-- Store item_name_raw exactly as received.
+| Method | Path | يحتاج دور | يترجم إلى |
+|---|---|---|---|
+| GET | `/health` | admin | `GET {BASE}/api/v1/stockcount/health` |
+| GET | `/items?page=&pageSize=` | admin | `GET {BASE}/api/v1/stockcount/items` |
+| GET | `/items/:itemId` | employee/admin (+ فحص جلسة/إسناد) | `GET {BASE}/api/v1/stockcount/items/:itemId` |
+| GET | `/items/:itemId/stock` | employee/admin (+ فحص جلسة/إسناد) | `GET {BASE}/api/v1/stockcount/items/:itemId/stock` |
 
-- Do not trim, normalize, translate, deduplicate, replace punctuation, remove "/" or "\" symbols, or modify spacing.
+- أي شيء آخر → `404`. أي non-GET → `405`.
+- `:itemId` يخضع لـ regex آمن قبل التمرير.
+- **بند 5:** فحص الدور داخل الدالة:
+  - `admin` فقط: `/health`, `/items` (المزامنة).
+  - `employee`: `/items/:id`, `/items/:id/stock` — بشرط وجود صنف بـ `external_item_id` في جلسة `open` ومسند إليه (`assigned_to = auth.uid`).
+- **بند 6:** لا rate limiting داخل الذاكرة الآن.
+- `X-StockCount-Key` تُضاف من السر فقط.
 
-- A separate item_name_search field may be generated only for searching.
+### 3) اختبار /health أولًا
+- طلب من المستخدم إدخال السرّين عبر نموذج آمن.
+- نداء `GET /health` عبر الدالة، حفظ النتيجة في `teryaq_health_pings`، عرضها في لوحة المدير.
+- **بند 13:** إن فشل → يظل الافتراضي `excel_import`، ولا يُعرَض خيار `live_api` بعد.
 
-- Always display item_name_raw.
+### 4) مزامنة تجريبية — 10 أصناف
+- Server fn `syncSessionFromTeryaq({ session_id, limit? })` — admin only:
+  - تفتح صفًا في `teryaq_sync_runs` (يفشل تلقائيًا إن كانت هناك مزامنة جارية — بند 11).
+  - في المرحلة 1 نمرّر `limit=10` من الواجهة كاختبار.
+  - `upsert` على `inventory_items` بمفتاح `(session_id, external_item_id)`.
+  - يحدّث `page_cursor`, `items_synced`، ثم `succeeded`.
+  - **لا حذف أصناف** غير الموجودة في الاستجابة.
+  - يحفظ `raw_quantity_snapshot`, `pack_size`, `formatted_quantity_snapshot`, `conversion_status`, `source_read_at`.
+  - `item_name_raw` كما ورد حرفيًا — لا تنظيف.
 
-&nbsp;
+### 5) شاشة العد (المرحلة 1)
+تعديل `src/components/employee/count-sheet.tsx` و`app.count.$id.tsx`:
+- **إزالة الشريط** من الواجهة (يبقى العمود في DB لكن غير مرئي/مستخدم في `live_api`).
+- عند فتح الصنف:
+  - نداء `/items/:externalId/stock` عبر الدالة.
+  - إدراج/تحديث صف `inventory_counts` بحالة `draft` مع كل `*_at_open` و`source_read_at_open`.
+- عرض: اسم الصنف كاملًا + الباركود + بطاقة "رصيد المنظومة" (علبة/وحدة/الصيغة النصية).
+- إدخال: حقلا رقم كبيران فقط — **علبة** و**وحدة**، مع أزرار `+1/-1` صغيرة بجانب كل حقل.
+- **بند 9:** إذا `conversion_status = missing_pack_size`:
+  - قفل حقل العلبة، السماح بالوحدات فقط.
+  - زر "أضف للمراجعة" يعلّم الصنف.
+- **بند 8:** الفرق يُعرض بقيمة مطلقة مع تسمية "عجز/زيادة/مطابق" — لا أرقام سالبة مربكة (`|difference_boxes|` و`|difference_units|`).
+- زر ثابت أسفل الشاشة: **اعتماد العدد**.
+- بعد الاعتماد: قفزة تلقائية للصنف التالي + "X من Y" + %.
 
-3. Use system_units and phys_units, not pieces, because the Excel uses the Arabic term "وحدة" and it must not be assumed to mean a tablet or piece.
+### 6) اعتماد العدد + منع الاعتماد عند تغيّر الرصيد (بند 1)
+عند الضغط على "اعتماد العدد":
+1. إعادة نداء `/items/:id/stock` → snapshot الاعتماد.
+2. **إن تغيّر `raw_quantity` أو `pack_size` عن snapshot الفتح:**
+   - **لا نحسب الفرق.**
+   - نحفظ نسخة `inventory_counts` جديدة بـ `requires_recount=true` + `recount_reason` (`stock_changed`/`pack_size_changed`) + كل `*_at_submit`.
+   - نعرض حوارًا بخيارين فقط: **إعادة العد الآن** أو **تأجيل للمراجعة**.
+3. إن لم يتغيّر:
+   - نحسب: `physical_raw = boxes×pack_size_at_submit + units`، `difference_raw = physical_raw − raw_quantity_at_submit`.
+   - `difference_boxes = trunc(difference_raw / pack_size_at_submit)`، `difference_units = remainder`.
+   - `diff_status` من {`match`, `shortage`, `excess`, `negative_stock`, `conversion_unavailable`}.
+   - **بند 12:** إن كانت هناك نسخة `is_current=true` نقلبها إلى `false` وننشئ نسخة جديدة بـ `count_version = prev+1`.
 
-&nbsp;
+### 7) تقرير فروقات بسيط
+تعديل `app.sessions.$id.report.tsx` (المرحلة 1 فقط):
+- أعمدة: اسم الصنف، الباركود، رصيد المنظومة عند الاعتماد، العدد الفعلي (علبة/وحدة)، الفرق (علبة/وحدة كقيمة مطلقة)، الحالة، `requires_recount`.
+- تصفية سريعة: الكل / مطابق / عجز / زيادة / يحتاج إعادة عد / تحويل غير متاح.
 
-4. Quantity units are independent in version 1. Never convert boxes, strips, and units into each other unless conversion metadata exists for that specific item.
+### 8) ما لن يُنفَّذ في المرحلة 1
+- Offline / IndexedDB / sync queue / client_operation_id / device sync status.
+- لوحة "العمليات غير المتزامنة عبر الأجهزة" (بند 10 — لن نوهم بذلك).
+- توزيع الموظفين التلقائي الجديد، لوحة التقدم المتقدمة، audit log كامل.
+- تقارير متقدمة (تصدير Excel/PDF للتنسيق الجديد).
 
-&nbsp;
+---
 
-5. Quantity parser must recognize:
+## الملفات المتأثرة في المرحلة 1
 
-علبة، علب، شريط، شرائط، وحدة، وحده، وحدات
+**جديدة:**
+- `supabase/functions/teryaq-stockcount-proxy/index.ts`
+- `supabase/migrations/<ts>_teryaq_live_api_phase1.sql`
+- `src/lib/teryaq.functions.ts` (`pingTeryaq`, `syncSessionFromTeryaq`, `getItemStock`, `submitCountLive`)
 
-and Arabic/English digits.
+**معدّلة:**
+- `src/routes/_authenticated/app.sessions.new.tsx` — إضافة خيار `live_api` (معطّل حتى نجاح `/health`).
+- `src/components/admin/admin-home.tsx` — بطاقة "حالة الاتصال بـ Teryaq" وزر "اختبار الآن".
+- `src/components/employee/count-sheet.tsx` — إزالة الشريط، snapshot الفتح/الاعتماد، منع الاعتماد عند التغيّر.
+- `src/routes/_authenticated/app.count.$id.tsx` — استخدام `external_item_id` والقفزة التالية.
+- `src/routes/_authenticated/app.sessions.$id.report.tsx` — تقرير فروقات مبسّط.
+- `src/lib/quantity-parser.ts` — دوال العرض بقيمة مطلقة (بند 8).
 
-Store quantity_parse_status as:
+**لن تُمَس:** `client.ts`, `client.server.ts`, `auth-middleware.ts`, `auth-attacher.ts`, `.env`, `supabase/config.toml` (على مستوى المشروع).
 
-parsed, partial, unrecognized, empty.
+---
 
-Never silently convert an unrecognized quantity to zero.
+## ترتيب التنفيذ الصارم للمرحلة 1
 
-Show an import review screen for problematic rows.
+1. تشغيل الـ Migration أعلاه.
+2. إنشاء Edge Function مع whitelist وفحص الدور.
+3. طلب السرّين من المستخدم.
+4. تشغيل `/health` وعرض النتيجة.
+5. **التوقف للتأكيد.**
+6. مزامنة 10 أصناف على جلسة اختبار وعرض النتائج.
+7. **التوقف للتأكيد.**
+8. تفعيل شاشة العد المبسّطة + منع الاعتماد + التقرير البسيط.
+9. **التوقف** — لا مرحلة 2 قبل موافقة صريحة.
 
-&nbsp;
-
-6. Barcode must be stored as text. Detect and flag scientific notation, decimal formatting, missing values, or possibly corrupted barcodes before import.
-
-&nbsp;
-
-7. Do not overwrite count history. inventory_counts must support versions:
-
-count_version, is_current, created_at, updated_at.
-
-Every correction creates a new auditable version.
-
-&nbsp;
-
-8. Do not rely only on row_start and row_end after assignment. Auto-split can use Excel row order, but assignments must ultimately store explicit item IDs per employee so reordering or re-importing cannot change ownership.
-
-&nbsp;
-
-9. While typing, save only a local draft. A count becomes official only when the employee presses "اعتماد العدد". Editing an approved count must create an audit record.
-
-&nbsp;
-
-10. Offline writes must include a unique client_operation_id for idempotency. Show pending sync count, last successful sync, and prevent session closure while unsynced counts exist.
-
-&nbsp;
-
-11. Reports must classify differences per unit:
-
-box difference, strip difference, unit difference.
-
-Do not calculate a combined net quantity without item-specific conversion data.
-
-&nbsp;
-
-12. Prioritize Excel export and printable RTL HTML reports. PDF generation with jsPDF is optional and should not block version 1.
+هل نعتمد لبدء المرحلة 1؟
