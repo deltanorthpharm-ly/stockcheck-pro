@@ -135,7 +135,7 @@ export const syncSessionFromTeryaq = createServerFn({ method: "POST" })
       const items = Array.isArray(payload) ? payload : (payload?.items ?? []);
       const now = new Date().toISOString();
 
-      const rows = items.slice(0, limit).map((it) => {
+      const rows = items.slice(0, limit).map((it, idx) => {
         const external = String((it["id"] ?? it["itemId"] ?? it["ItemId"]) ?? "");
         const name = String((it["name"] ?? it["itemName"] ?? it["ItemName"]) ?? external);
         const barcode = (it["barcode"] ?? it["Barcode"] ?? null) as string | null;
@@ -150,6 +150,7 @@ export const syncSessionFromTeryaq = createServerFn({ method: "POST" })
           | "ok" | "missing_pack_size" | "negative_stock" | "unavailable" | null;
         return {
           session_id: data.session_id,
+          row_index: idx,
           external_item_id: external,
           item_name_raw: name,
           barcode: barcode ?? null,
