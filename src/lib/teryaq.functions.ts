@@ -297,6 +297,8 @@ export const syncSessionFromTeryaq = createServerFn({ method: "POST" })
     const startedAtMs = Date.now();
     let totalAvailableFromTeryaq = 0;
     let receivedFromTeryaq = 0;
+    let importedItems = 0;
+    let skippedZeroStock = 0;
     let mappedRows = 0;
     let savedRows = 0;
     let pagesProcessed = 0;
@@ -341,15 +343,35 @@ export const syncSessionFromTeryaq = createServerFn({ method: "POST" })
 
         receivedFromTeryaq += items.length;
         hasNextPage = normalized.hasNextPage;
+        const stockItems = items.filter((it) => {
+          const rawQuantity = Number(it["rawQuantity"] ?? 0);
+          return Number.isFinite(rawQuantity) && rawQuantity > 0;
+        });
+        skippedZeroStock += items.length - stockItems.length;
+        const startIndex = mappedRows + 1;
         const rows = mapTeryaqItemsToInventoryRows(
           data.session_id,
-          items,
-          (page - 1) * pageSize + 1,
+          stockItems,
+          startIndex,
         );
+        importedItems += stockItems.length;
         mappedRows += rows.length;
-        console.log("[teryaq-sync] page=", page, "received=", items.length, "mapped=", rows.length, "has_next=", hasNextPage);
+        console.log(
+          "[teryaq-sync] page=",
+          page,
+          "received=",
+          items.length,
+          "imported=",
+          stockItems.length,
+          "skipped_zero_stock=",
+          items.length - stockItems.length,
+          "mapped=",
+          rows.length,
+          "has_next=",
+          hasNextPage,
+        );
 
-        if (items.length > 0 && rows.length === 0) {
+        if (stockItems.length > 0 && rows.length === 0) {
           throw new Error(`Page ${page}: no rows mapped from Teryaq response - check itemId field.`);
         }
 
@@ -403,21 +425,8 @@ export const syncSessionFromTeryaq = createServerFn({ method: "POST" })
         }
       }
 
-      if (savedRows !== totalAvailableFromTeryaq) {
-        throw new Error(`Full sync count mismatch (${savedRows}/${totalAvailableFromTeryaq})`);
-      }
-
-      const { count: sessionCount, error: sessionCountErr } = await context.supabase
-        .from("inventory_items")
-        .select("id", { count: "exact", head: true })
-        .eq("session_id", data.session_id)
-        .not("external_item_id", "is", null);
-      if (sessionCountErr) {
-        console.error("[teryaq-sync] session count verify failed:", sessionCountErr.code, sessionCountErr.message);
-        throw new Error(`Failed to verify final session count (${sessionCountErr.code ?? "?"})`);
-      }
-      if ((sessionCount ?? 0) !== totalAvailableFromTeryaq) {
-        throw new Error(`Session item count mismatch (${sessionCount ?? 0}/${totalAvailableFromTeryaq})`);
+      if (savedRows !== importedItems) {
+        throw new Error(`Imported stock item count mismatch (${savedRows}/${importedItems})`);
       }
 
       const { error: sessionErr } = await context.supabase
@@ -454,6 +463,8 @@ export const syncSessionFromTeryaq = createServerFn({ method: "POST" })
       items_synced: savedRows,
       total_available_from_teryaq: totalAvailableFromTeryaq,
       received_from_teryaq: receivedFromTeryaq,
+      imported_items: importedItems,
+      skipped_zero_stock: skippedZeroStock,
       mapped_rows: mappedRows,
       saved_rows: savedRows,
       pages_processed: pagesProcessed,
