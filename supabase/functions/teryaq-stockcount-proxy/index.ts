@@ -21,6 +21,8 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const TERYAQ_BASE_URL = Deno.env.get("TERYAQ_STOCKCOUNT_BASE_URL") ?? "";
 const TERYAQ_API_KEY = Deno.env.get("TERYAQ_STOCKCOUNT_API_KEY") ?? "";
+const CF_ACCESS_CLIENT_ID = Deno.env.get("CF_ACCESS_CLIENT_ID") ?? "";
+const CF_ACCESS_CLIENT_SECRET = Deno.env.get("CF_ACCESS_CLIENT_SECRET") ?? "";
 
 const ITEM_ID_RE = /^[A-Za-z0-9_\-]{1,64}$/;
 
@@ -117,18 +119,36 @@ async function forwardGet(
   const startedAt = Date.now();
   let upstream: Response;
   try {
+    const headers: Record<string, string> = {
+      "X-StockCount-Key": TERYAQ_API_KEY,
+      Accept: "application/json",
+    };
+    if (CF_ACCESS_CLIENT_ID && CF_ACCESS_CLIENT_SECRET) {
+      headers["CF-Access-Client-Id"] = CF_ACCESS_CLIENT_ID;
+      headers["CF-Access-Client-Secret"] = CF_ACCESS_CLIENT_SECRET;
+    }
     upstream = await fetch(target.toString(), {
       method: "GET",
-      headers: {
-        "X-StockCount-Key": TERYAQ_API_KEY,
-        Accept: "application/json",
-      },
+      headers,
     });
   } catch (e) {
     return json({ error: `upstream fetch failed: ${(e as Error).message}` }, 502);
   }
   const text = await upstream.text();
   const contentType = upstream.headers.get("content-type") ?? "application/json";
+  // Detect Cloudflare Access interstitial (HTML page returned with 200).
+  const looksHtml = /^\s*<(?:!doctype|html)/i.test(text);
+  if (looksHtml || contentType.includes("text/html")) {
+    return json(
+      {
+        error:
+          "upstream returned an HTML page (likely Cloudflare Access). Missing/invalid CF-Access-Client-Id / CF-Access-Client-Secret.",
+        upstream_status: upstream.status,
+        upstream_content_type: contentType,
+      },
+      502,
+    );
+  }
   return new Response(text, {
     status: upstream.status,
     headers: {
