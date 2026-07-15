@@ -96,6 +96,19 @@ export const syncSessionFromTeryaq = createServerFn({ method: "POST" })
     });
     if (!isAdmin) throw new Error("Forbidden");
 
+    // Release stale running runs for this session (older than 10 minutes).
+    const staleCutoff = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    await context.supabase
+      .from("teryaq_sync_runs")
+      .update({
+        status: "failed",
+        error: "Stale sync run exceeded 10 minutes and was released.",
+        finished_at: new Date().toISOString(),
+      })
+      .eq("session_id", data.session_id)
+      .eq("status", "running")
+      .lt("started_at", staleCutoff);
+
     // Try to open a sync run. Partial unique index enforces "one running per session".
     const { data: run, error: runErr } = await context.supabase
       .from("teryaq_sync_runs")
@@ -192,18 +205,18 @@ export const syncSessionFromTeryaq = createServerFn({ method: "POST" })
       }
     } catch (e) {
       errorMsg = (e as Error).message;
+    } finally {
+      await context.supabase
+        .from("teryaq_sync_runs")
+        .update({
+          status: errorMsg ? "failed" : "succeeded",
+          items_synced: itemsSynced,
+          page_cursor: itemsSynced,
+          error: errorMsg,
+          finished_at: new Date().toISOString(),
+        })
+        .eq("id", run.id);
     }
-
-    await context.supabase
-      .from("teryaq_sync_runs")
-      .update({
-        status: errorMsg ? "failed" : "succeeded",
-        items_synced: itemsSynced,
-        page_cursor: itemsSynced,
-        error: errorMsg,
-        finished_at: new Date().toISOString(),
-      })
-      .eq("id", run.id);
 
     if (errorMsg) throw new Error(errorMsg);
     return {
