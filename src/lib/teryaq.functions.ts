@@ -118,6 +118,11 @@ function mapTeryaqItemsToInventoryRows(
   items: TeryaqItem[],
   startIndex: number,
 ) {
+  const integerOrNull = (value: number | null) =>
+    value != null && Number.isInteger(value) ? value : null;
+  const integerOrZero = (value: number | null) =>
+    value != null && Number.isInteger(value) ? value : 0;
+
   return items.map((it, idx) => {
     const external = it["itemId"] != null ? String(it["itemId"]) : "";
     const name = (it["itemName"] as string | undefined) ?? external;
@@ -126,6 +131,20 @@ function mapTeryaqItemsToInventoryRows(
     const convStatus = (it["conversionStatus"] as string | null) ?? null;
     const formatted = (it["formattedQuantity"] as string | null) ?? null;
     const rawQty = it["rawQuantity"] == null ? null : Number(it["rawQuantity"]);
+    const hasFractionalQuantity =
+      (boxesSnap != null && !Number.isInteger(boxesSnap)) ||
+      (unitsSnap != null && !Number.isInteger(unitsSnap));
+
+    if (hasFractionalQuantity) {
+      console.warn("[teryaq-sync] invalid fractional quantity from Teryaq", {
+        itemId: external,
+        systemBoxes: boxesSnap,
+        systemUnits: unitsSnap,
+        rawQuantity: rawQty,
+        formattedQuantity: formatted,
+      });
+    }
+
     return {
       session_id: sessionId,
       row_index: startIndex + idx,
@@ -135,16 +154,16 @@ function mapTeryaqItemsToInventoryRows(
       selling_price: it["sellingPrice"] == null ? 0 : Number(it["sellingPrice"]),
       expiry_date: (it["expiryDate"] as string | null) ?? null,
       system_quantity_raw: formatted ?? String(rawQty ?? 0),
-      system_boxes: boxesSnap ?? 0,
+      system_boxes: hasFractionalQuantity ? 0 : integerOrZero(boxesSnap),
       system_strips: 0,
-      system_units: unitsSnap ?? 0,
-      quantity_parse_status: convStatus === "ok" ? "parsed" : "partial",
-      pack_size: it["packSize"] == null ? null : Number(it["packSize"]),
+      system_units: hasFractionalQuantity ? 0 : integerOrZero(unitsSnap),
+      quantity_parse_status: hasFractionalQuantity || convStatus !== "ok" ? "partial" : "parsed",
+      pack_size: integerOrNull(it["packSize"] == null ? null : Number(it["packSize"])),
       raw_quantity_snapshot: rawQty,
-      system_boxes_snapshot: boxesSnap,
-      system_units_snapshot: unitsSnap,
+      system_boxes_snapshot: hasFractionalQuantity ? null : integerOrNull(boxesSnap),
+      system_units_snapshot: hasFractionalQuantity ? null : integerOrNull(unitsSnap),
       formatted_quantity_snapshot: formatted,
-      conversion_status: convStatus,
+      conversion_status: hasFractionalQuantity ? "unavailable" : convStatus,
       source_read_at: (it["readAt"] as string | null) ?? new Date().toISOString(),
     };
   }).filter((r) => r.external_item_id);
