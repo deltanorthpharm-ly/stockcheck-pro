@@ -141,42 +141,70 @@ export const syncSessionFromTeryaq = createServerFn({ method: "POST" })
         page: "1",
         pageSize: String(limit),
       });
+      const bodyIsString = typeof r.body === "string";
+      const topKeys =
+        r.body && typeof r.body === "object" && !Array.isArray(r.body)
+          ? Object.keys(r.body as Record<string, unknown>)
+          : Array.isArray(r.body) ? ["<array>"] : [`<${typeof r.body}>`];
+      console.log("[teryaq-sync] upstream_status=", r.status, "top_keys=", topKeys, "latency_ms=", r.latencyMs);
       if (!r.ok) {
+        const safeSnippet = bodyIsString
+          ? (r.body as string).slice(0, 200)
+          : JSON.stringify(r.body).slice(0, 200);
+        throw new Error(`Teryaq /items failed: HTTP ${r.status} ${safeSnippet}`);
+      }
+      if (bodyIsString) {
         throw new Error(
-          `Teryaq /items failed: HTTP ${r.status} ${typeof r.body === "string" ? r.body : JSON.stringify(r.body)}`,
+          "Teryaq /items returned a non-JSON body (likely Cloudflare Access interstitial). Configure CF-Access-Client-Id / CF-Access-Client-Secret.",
         );
       }
-      const payload = r.body as { data?: Array<Record<string, unknown>> } | Array<Record<string, unknown>>;
+      // Safe normalization across possible shapes.
+      const payload = r.body as Record<string, unknown> | Array<Record<string, unknown>>;
       const items: Array<Record<string, unknown>> = Array.isArray(payload)
         ? payload
-        : Array.isArray(payload?.data) ? payload!.data! : [];
+        : Array.isArray((payload as { data?: unknown })?.data)
+          ? ((payload as { data: Array<Record<string, unknown>> }).data)
+          : Array.isArray(((payload as { data?: { data?: unknown } })?.data as { data?: unknown } | undefined)?.data)
+            ? ((payload as { data: { data: Array<Record<string, unknown>> } }).data.data)
+            : Array.isArray((payload as { items?: unknown })?.items)
+              ? ((payload as { items: Array<Record<string, unknown>> }).items)
+              : [];
       receivedFromTeryaq = items.length;
-      console.log("[teryaq-sync] received_from_teryaq=", receivedFromTeryaq);
+      const firstKeys = items[0] ? Object.keys(items[0]) : [];
+      console.log("[teryaq-sync] received_from_teryaq=", receivedFromTeryaq, "first_item_keys=", firstKeys);
+      if (receivedFromTeryaq === 0) {
+        throw new Error(
+          `Teryaq /items returned zero rows. Top keys: ${topKeys.join(",")}. Check upstream response shape.`,
+        );
+      }
 
       const rows = items.slice(0, limit).map((it, idx) => {
         const external = it["itemId"] != null ? String(it["itemId"]) : "";
         const name = (it["itemName"] as string | undefined) ?? external;
         const boxesSnap = it["systemBoxes"] == null ? null : Number(it["systemBoxes"]);
         const unitsSnap = it["systemUnits"] == null ? null : Number(it["systemUnits"]);
+        const convStatus = (it["conversionStatus"] as string | null) ?? null;
+        const formatted = (it["formattedQuantity"] as string | null) ?? null;
+        const rawQty = it["rawQuantity"] == null ? null : Number(it["rawQuantity"]);
         return {
           session_id: data.session_id,
-          row_index: idx,
+          row_index: idx + 1,
           external_item_id: external,
           item_name_raw: name,
           barcode: (it["barcode"] as string | null) ?? null,
-          selling_price: it["sellingPrice"] == null ? null : Number(it["sellingPrice"]),
+          selling_price: it["sellingPrice"] == null ? 0 : Number(it["sellingPrice"]),
           expiry_date: (it["expiryDate"] as string | null) ?? null,
-          system_quantity_raw: (it["formattedQuantity"] as string | null) ?? null,
+          system_quantity_raw: formatted ?? String(rawQty ?? 0),
           system_boxes: boxesSnap ?? 0,
           system_strips: 0,
           system_units: unitsSnap ?? 0,
-          quantity_parse_status: "ok",
+          quantity_parse_status: convStatus === "ok" ? "parsed" : "partial",
           pack_size: it["packSize"] == null ? null : Number(it["packSize"]),
-          raw_quantity_snapshot: it["rawQuantity"] == null ? null : Number(it["rawQuantity"]),
+          raw_quantity_snapshot: rawQty,
           system_boxes_snapshot: boxesSnap,
           system_units_snapshot: unitsSnap,
-          formatted_quantity_snapshot: (it["formattedQuantity"] as string | null) ?? null,
-          conversion_status: (it["conversionStatus"] as string | null) ?? null,
+          formatted_quantity_snapshot: formatted,
+          conversion_status: convStatus,
           source_read_at: (it["readAt"] as string | null) ?? new Date().toISOString(),
         };
       }).filter((r) => r.external_item_id);
@@ -184,17 +212,32 @@ export const syncSessionFromTeryaq = createServerFn({ method: "POST" })
       console.log("[teryaq-sync] mapped_rows=", mappedRows);
 
       if (rows.length > 0) {
-        // Upsert on (session_id, external_item_id)
+        // Upsert on (session_id, external_item_id) and verify via follow-up count.
         const { error: upErr } = await context.supabase
           .from("inventory_items")
           .upsert(rows, { onConflict: "session_id,external_item_id" });
         if (upErr) {
           console.error("[teryaq-sync] upsert failed:", upErr.code, upErr.message);
-          throw new Error(`فشل الحفظ في قاعدة البيانات (${upErr.code ?? "?"})`);
+          throw new Error(`فشل الحفظ في قاعدة البيانات (${upErr.code ?? "?"}): ${upErr.message}`);
         }
+        const externalIds = rows.map((r) => r.external_item_id);
+        const { count, error: cntErr } = await context.supabase
+          .from("inventory_items")
+          .select("id", { count: "exact", head: true })
+          .eq("session_id", data.session_id)
+          .in("external_item_id", externalIds);
+        if (cntErr) {
+          console.error("[teryaq-sync] verify-count failed:", cntErr.code, cntErr.message);
+          throw new Error(`تعذر التحقق من الحفظ (${cntErr.code ?? "?"})`);
+        }
+        itemsSynced = count ?? 0;
+        console.log("[teryaq-sync] verified_saved_rows=", itemsSynced);
+        if (itemsSynced === 0) {
+          throw new Error("Upsert succeeded but no rows are visible for this session (RLS or filter issue).");
+        }
+      } else {
+        throw new Error("No rows mapped from Teryaq response — check itemId field.");
       }
-      itemsSynced = rows.length;
-      console.log("[teryaq-sync] saved_rows=", itemsSynced);
 
       // Mark session as live_api on first successful sync (only when we actually saved rows).
       if (itemsSynced > 0) {
@@ -205,6 +248,7 @@ export const syncSessionFromTeryaq = createServerFn({ method: "POST" })
       }
     } catch (e) {
       errorMsg = (e as Error).message;
+      console.error("[teryaq-sync] error:", errorMsg);
     } finally {
       await context.supabase
         .from("teryaq_sync_runs")
