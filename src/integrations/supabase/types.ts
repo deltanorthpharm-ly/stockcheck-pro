@@ -315,6 +315,7 @@ export type Database = {
           started_at: string
           started_by: string
           status: string
+          total_items: number
         }
         Insert: {
           error?: string | null
@@ -326,6 +327,7 @@ export type Database = {
           started_at?: string
           started_by: string
           status: string
+          total_items?: number
         }
         Update: {
           error?: string | null
@@ -337,6 +339,7 @@ export type Database = {
           started_at?: string
           started_by?: string
           status?: string
+          total_items?: number
         }
         Relationships: [
           {

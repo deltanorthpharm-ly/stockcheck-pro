@@ -17,6 +17,27 @@ function json(body: unknown, status = 200) {
   });
 }
 
+function safeHeaders(headers: Headers): Record<string, string> {
+  const allowed = [
+    "cache-control",
+    "cf-cache-status",
+    "cf-ray",
+    "content-type",
+    "date",
+    "expires",
+    "location",
+    "server",
+    "vary",
+  ];
+  const out: Record<string, string> = {};
+  for (const key of allowed) {
+    const value = headers.get(key);
+    if (value) out[key] = value;
+  }
+  if (headers.has("set-cookie")) out["set-cookie"] = "[present-redacted]";
+  return out;
+}
+
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const TERYAQ_BASE_URL = Deno.env.get("TERYAQ_STOCKCOUNT_BASE_URL") ?? "";
@@ -145,6 +166,7 @@ async function forwardGet(
           "upstream returned an HTML page (likely Cloudflare Access). Missing/invalid CF-Access-Client-Id / CF-Access-Client-Secret.",
         upstream_status: upstream.status,
         upstream_content_type: contentType,
+        upstream_headers: safeHeaders(upstream.headers),
       },
       502,
     );
