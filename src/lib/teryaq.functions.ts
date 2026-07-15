@@ -79,13 +79,84 @@ export const getLatestHealthPing = createServerFn({ method: "GET" })
     return data;
   });
 
-// Admin-only: sync a batch of items from Teryaq into a session.
-// Phase 1: limit=10 by default for the smoke test.
+type TeryaqItem = Record<string, unknown>;
+
+function normalizeItemsPayload(body: unknown): {
+  items: TeryaqItem[];
+  totalItems: number | null;
+  hasNextPage: boolean;
+} {
+  if (Array.isArray(body)) {
+    return { items: body as TeryaqItem[], totalItems: body.length, hasNextPage: false };
+  }
+  if (!body || typeof body !== "object") {
+    return { items: [], totalItems: null, hasNextPage: false };
+  }
+  const payload = body as {
+    data?: unknown;
+    items?: unknown;
+    pagination?: { totalItems?: unknown; hasNextPage?: unknown };
+  };
+  const items = Array.isArray(payload.data)
+    ? (payload.data as TeryaqItem[])
+    : Array.isArray((payload.data as { data?: unknown } | undefined)?.data)
+      ? ((payload.data as { data: TeryaqItem[] }).data)
+      : Array.isArray(payload.items)
+        ? (payload.items as TeryaqItem[])
+        : [];
+  const totalItemsRaw = payload.pagination?.totalItems;
+  const totalItems = typeof totalItemsRaw === "number" ? totalItemsRaw : null;
+  return {
+    items,
+    totalItems,
+    hasNextPage: payload.pagination?.hasNextPage === true,
+  };
+}
+
+function mapTeryaqItemsToInventoryRows(
+  sessionId: string,
+  items: TeryaqItem[],
+  startIndex: number,
+) {
+  return items.map((it, idx) => {
+    const external = it["itemId"] != null ? String(it["itemId"]) : "";
+    const name = (it["itemName"] as string | undefined) ?? external;
+    const boxesSnap = it["systemBoxes"] == null ? null : Number(it["systemBoxes"]);
+    const unitsSnap = it["systemUnits"] == null ? null : Number(it["systemUnits"]);
+    const convStatus = (it["conversionStatus"] as string | null) ?? null;
+    const formatted = (it["formattedQuantity"] as string | null) ?? null;
+    const rawQty = it["rawQuantity"] == null ? null : Number(it["rawQuantity"]);
+    return {
+      session_id: sessionId,
+      row_index: startIndex + idx,
+      external_item_id: external,
+      item_name_raw: name,
+      barcode: (it["barcode"] as string | null) ?? null,
+      selling_price: it["sellingPrice"] == null ? 0 : Number(it["sellingPrice"]),
+      expiry_date: (it["expiryDate"] as string | null) ?? null,
+      system_quantity_raw: formatted ?? String(rawQty ?? 0),
+      system_boxes: boxesSnap ?? 0,
+      system_strips: 0,
+      system_units: unitsSnap ?? 0,
+      quantity_parse_status: convStatus === "ok" ? "parsed" : "partial",
+      pack_size: it["packSize"] == null ? null : Number(it["packSize"]),
+      raw_quantity_snapshot: rawQty,
+      system_boxes_snapshot: boxesSnap,
+      system_units_snapshot: unitsSnap,
+      formatted_quantity_snapshot: formatted,
+      conversion_status: convStatus,
+      source_read_at: (it["readAt"] as string | null) ?? new Date().toISOString(),
+    };
+  }).filter((r) => r.external_item_id);
+}
+
+// Admin-only: sync all Teryaq items into a session using paginated batches.
 export const syncSessionFromTeryaq = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input) =>
     z.object({
       session_id: z.string().uuid(),
+      // Kept for compatibility with older callers; full sync always uses pageSize=500.
       limit: z.number().int().min(1).max(500).optional(),
     }).parse(input),
   )
@@ -118,6 +189,7 @@ export const syncSessionFromTeryaq = createServerFn({ method: "POST" })
         status: "running",
         page_cursor: 0,
         items_synced: 0,
+        total_items: 0,
       })
       .select("id")
       .single();
@@ -129,145 +201,163 @@ export const syncSessionFromTeryaq = createServerFn({ method: "POST" })
       );
     }
 
-    const limit = data.limit ?? 10;
+    const pageSize = 500;
     const jwt = getBearer();
-    let itemsSynced = 0;
+    const startedAtMs = Date.now();
+    let totalAvailableFromTeryaq = 0;
     let receivedFromTeryaq = 0;
     let mappedRows = 0;
+    let savedRows = 0;
+    let pagesProcessed = 0;
+    let currentPage = 0;
     let errorMsg: string | null = null;
 
     try {
-      const r = await callProxy(jwt, "/items", {
-        page: "1",
-        pageSize: String(limit),
-      });
-      const bodyIsString = typeof r.body === "string";
-      const topKeys =
-        r.body && typeof r.body === "object" && !Array.isArray(r.body)
-          ? Object.keys(r.body as Record<string, unknown>)
-          : Array.isArray(r.body) ? ["<array>"] : [`<${typeof r.body}>`];
-      console.log("[teryaq-sync] upstream_status=", r.status, "top_keys=", topKeys, "latency_ms=", r.latencyMs);
-      if (!r.ok) {
-        const safeSnippet = bodyIsString
-          ? (r.body as string).slice(0, 200)
-          : JSON.stringify(r.body).slice(0, 200);
-        throw new Error(`Teryaq /items failed: HTTP ${r.status} ${safeSnippet}`);
-      }
-      if (bodyIsString) {
-        throw new Error(
-          "Teryaq /items returned a non-JSON body (likely Cloudflare Access interstitial). Configure CF-Access-Client-Id / CF-Access-Client-Secret.",
+      for (let page = 1, hasNextPage = true; hasNextPage; page += 1) {
+        currentPage = page;
+        const r = await callProxy(jwt, "/items", {
+          page: String(page),
+          pageSize: String(pageSize),
+        });
+        const bodyIsString = typeof r.body === "string";
+        const topKeys =
+          r.body && typeof r.body === "object" && !Array.isArray(r.body)
+            ? Object.keys(r.body as Record<string, unknown>)
+            : Array.isArray(r.body) ? ["<array>"] : [`<${typeof r.body}>`];
+        console.log("[teryaq-sync] page=", page, "upstream_status=", r.status, "top_keys=", topKeys, "latency_ms=", r.latencyMs);
+        if (!r.ok) {
+          const safeSnippet = bodyIsString
+            ? (r.body as string).slice(0, 200)
+            : JSON.stringify(r.body).slice(0, 200);
+          throw new Error(`Page ${page}: Teryaq /items failed: HTTP ${r.status} ${safeSnippet}`);
+        }
+        if (bodyIsString) {
+          throw new Error(
+            `Page ${page}: Teryaq /items returned a non-JSON body (likely Cloudflare Access interstitial). Configure CF-Access-Client-Id / CF-Access-Client-Secret.`,
+          );
+        }
+
+        const normalized = normalizeItemsPayload(r.body);
+        const items = normalized.items;
+        if (page === 1) {
+          totalAvailableFromTeryaq = normalized.totalItems ?? items.length;
+          if (totalAvailableFromTeryaq === 0) {
+            throw new Error(
+              `Teryaq /items returned zero rows. Top keys: ${topKeys.join(",")}. Check upstream response shape.`,
+            );
+          }
+        }
+
+        receivedFromTeryaq += items.length;
+        hasNextPage = normalized.hasNextPage;
+        const rows = mapTeryaqItemsToInventoryRows(
+          data.session_id,
+          items,
+          (page - 1) * pageSize + 1,
         );
-      }
-      // Safe normalization across possible shapes.
-      const payload = r.body as Record<string, unknown> | Array<Record<string, unknown>>;
-      const items: Array<Record<string, unknown>> = Array.isArray(payload)
-        ? payload
-        : Array.isArray((payload as { data?: unknown })?.data)
-          ? ((payload as { data: Array<Record<string, unknown>> }).data)
-          : Array.isArray(((payload as { data?: { data?: unknown } })?.data as { data?: unknown } | undefined)?.data)
-            ? ((payload as { data: { data: Array<Record<string, unknown>> } }).data.data)
-            : Array.isArray((payload as { items?: unknown })?.items)
-              ? ((payload as { items: Array<Record<string, unknown>> }).items)
-              : [];
-      receivedFromTeryaq = items.length;
-      const firstKeys = items[0] ? Object.keys(items[0]) : [];
-      console.log("[teryaq-sync] received_from_teryaq=", receivedFromTeryaq, "first_item_keys=", firstKeys);
-      if (receivedFromTeryaq === 0) {
-        throw new Error(
-          `Teryaq /items returned zero rows. Top keys: ${topKeys.join(",")}. Check upstream response shape.`,
-        );
-      }
+        mappedRows += rows.length;
+        console.log("[teryaq-sync] page=", page, "received=", items.length, "mapped=", rows.length, "has_next=", hasNextPage);
 
-      const rows = items.slice(0, limit).map((it, idx) => {
-        const external = it["itemId"] != null ? String(it["itemId"]) : "";
-        const name = (it["itemName"] as string | undefined) ?? external;
-        const boxesSnap = it["systemBoxes"] == null ? null : Number(it["systemBoxes"]);
-        const unitsSnap = it["systemUnits"] == null ? null : Number(it["systemUnits"]);
-        const convStatus = (it["conversionStatus"] as string | null) ?? null;
-        const formatted = (it["formattedQuantity"] as string | null) ?? null;
-        const rawQty = it["rawQuantity"] == null ? null : Number(it["rawQuantity"]);
-        return {
-          session_id: data.session_id,
-          row_index: idx + 1,
-          external_item_id: external,
-          item_name_raw: name,
-          barcode: (it["barcode"] as string | null) ?? null,
-          selling_price: it["sellingPrice"] == null ? 0 : Number(it["sellingPrice"]),
-          expiry_date: (it["expiryDate"] as string | null) ?? null,
-          system_quantity_raw: formatted ?? String(rawQty ?? 0),
-          system_boxes: boxesSnap ?? 0,
-          system_strips: 0,
-          system_units: unitsSnap ?? 0,
-          quantity_parse_status: convStatus === "ok" ? "parsed" : "partial",
-          pack_size: it["packSize"] == null ? null : Number(it["packSize"]),
-          raw_quantity_snapshot: rawQty,
-          system_boxes_snapshot: boxesSnap,
-          system_units_snapshot: unitsSnap,
-          formatted_quantity_snapshot: formatted,
-          conversion_status: convStatus,
-          source_read_at: (it["readAt"] as string | null) ?? new Date().toISOString(),
-        };
-      }).filter((r) => r.external_item_id);
-      mappedRows = rows.length;
-      console.log("[teryaq-sync] mapped_rows=", mappedRows);
+        if (items.length > 0 && rows.length === 0) {
+          throw new Error(`Page ${page}: no rows mapped from Teryaq response - check itemId field.`);
+        }
 
-      if (rows.length > 0) {
-        // Upsert on (session_id, external_item_id) and verify via follow-up count.
-        const { error: upErr } = await context.supabase
-          .from("inventory_items")
-          .upsert(rows, { onConflict: "session_id,external_item_id" });
-        if (upErr) {
-          console.error("[teryaq-sync] upsert failed:", upErr.code, upErr.message);
-          throw new Error(`فشل الحفظ في قاعدة البيانات (${upErr.code ?? "?"}): ${upErr.message}`);
+        if (rows.length > 0) {
+          const { error: upErr } = await context.supabase
+            .from("inventory_items")
+            .upsert(rows, { onConflict: "session_id,external_item_id" });
+          if (upErr) {
+            console.error("[teryaq-sync] page upsert failed:", page, upErr.code, upErr.message);
+            throw new Error(`Page ${page}: failed to save inventory batch (${upErr.code ?? "?"})`);
+          }
+
+          const externalIds = rows.map((r) => r.external_item_id);
+          const { count, error: cntErr } = await context.supabase
+            .from("inventory_items")
+            .select("id", { count: "exact", head: true })
+            .eq("session_id", data.session_id)
+            .in("external_item_id", externalIds);
+          if (cntErr) {
+            console.error("[teryaq-sync] page verify-count failed:", page, cntErr.code, cntErr.message);
+            throw new Error(`Page ${page}: failed to verify saved batch (${cntErr.code ?? "?"})`);
+          }
+          if ((count ?? 0) !== rows.length) {
+            throw new Error(`Page ${page}: saved row count mismatch (${count ?? 0}/${rows.length})`);
+          }
+          savedRows += count ?? 0;
         }
-        const externalIds = rows.map((r) => r.external_item_id);
-        const { count, error: cntErr } = await context.supabase
-          .from("inventory_items")
-          .select("id", { count: "exact", head: true })
-          .eq("session_id", data.session_id)
-          .in("external_item_id", externalIds);
-        if (cntErr) {
-          console.error("[teryaq-sync] verify-count failed:", cntErr.code, cntErr.message);
-          throw new Error(`تعذر التحقق من الحفظ (${cntErr.code ?? "?"})`);
+
+        pagesProcessed = page;
+        const { error: progressErr } = await context.supabase
+          .from("teryaq_sync_runs")
+          .update({
+            status: "running",
+            items_synced: savedRows,
+            page_cursor: page,
+            total_items: totalAvailableFromTeryaq,
+          })
+          .eq("id", run.id);
+        if (progressErr) {
+          console.error("[teryaq-sync] progress update failed:", progressErr.code, progressErr.message);
+          throw new Error(`Page ${page}: failed to update sync progress (${progressErr.code ?? "?"})`);
         }
-        itemsSynced = count ?? 0;
-        console.log("[teryaq-sync] verified_saved_rows=", itemsSynced);
-        if (itemsSynced === 0) {
-          throw new Error("Upsert succeeded but no rows are visible for this session (RLS or filter issue).");
-        }
-      } else {
-        throw new Error("No rows mapped from Teryaq response — check itemId field.");
       }
 
-      // Mark session as live_api on first successful sync (only when we actually saved rows).
-      if (itemsSynced > 0) {
-        await context.supabase
-          .from("inventory_sessions")
-          .update({ source_type: "live_api" })
-          .eq("id", data.session_id);
+      if (savedRows !== totalAvailableFromTeryaq) {
+        throw new Error(`Full sync count mismatch (${savedRows}/${totalAvailableFromTeryaq})`);
+      }
+
+      const { count: sessionCount, error: sessionCountErr } = await context.supabase
+        .from("inventory_items")
+        .select("id", { count: "exact", head: true })
+        .eq("session_id", data.session_id)
+        .not("external_item_id", "is", null);
+      if (sessionCountErr) {
+        console.error("[teryaq-sync] session count verify failed:", sessionCountErr.code, sessionCountErr.message);
+        throw new Error(`Failed to verify final session count (${sessionCountErr.code ?? "?"})`);
+      }
+      if ((sessionCount ?? 0) !== totalAvailableFromTeryaq) {
+        throw new Error(`Session item count mismatch (${sessionCount ?? 0}/${totalAvailableFromTeryaq})`);
+      }
+
+      const { error: sessionErr } = await context.supabase
+        .from("inventory_sessions")
+        .update({ source_type: "live_api" })
+        .eq("id", data.session_id);
+      if (sessionErr) {
+        console.error("[teryaq-sync] session source update failed:", sessionErr.code, sessionErr.message);
+        throw new Error(`Failed to mark session as live API (${sessionErr.code ?? "?"})`);
       }
     } catch (e) {
       errorMsg = (e as Error).message;
       console.error("[teryaq-sync] error:", errorMsg);
     } finally {
-      await context.supabase
+      const { error: finalErr } = await context.supabase
         .from("teryaq_sync_runs")
         .update({
           status: errorMsg ? "failed" : "succeeded",
-          items_synced: itemsSynced,
-          page_cursor: itemsSynced,
+          items_synced: savedRows,
+          page_cursor: currentPage || pagesProcessed,
+          total_items: totalAvailableFromTeryaq,
           error: errorMsg,
           finished_at: new Date().toISOString(),
         })
         .eq("id", run.id);
+      if (finalErr) {
+        console.error("[teryaq-sync] final status update failed:", finalErr.code, finalErr.message);
+      }
     }
 
     if (errorMsg) throw new Error(errorMsg);
     return {
       run_id: run.id,
-      items_synced: itemsSynced,
+      items_synced: savedRows,
+      total_available_from_teryaq: totalAvailableFromTeryaq,
       received_from_teryaq: receivedFromTeryaq,
       mapped_rows: mappedRows,
-      saved_rows: itemsSynced,
+      saved_rows: savedRows,
+      pages_processed: pagesProcessed,
+      execution_time_ms: Date.now() - startedAtMs,
+      final_status: "succeeded",
     };
   });

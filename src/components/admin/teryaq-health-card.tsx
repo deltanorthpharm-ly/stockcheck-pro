@@ -31,7 +31,7 @@ export function TeryaqHealthCard() {
   });
 
   const syncM = useMutation({
-    mutationFn: () => sync({ data: { session_id: chosenSession, limit: 10 } }),
+    mutationFn: () => sync({ data: { session_id: chosenSession } }),
   });
 
   const healthOk = latest?.ok === true;
@@ -68,7 +68,7 @@ export function TeryaqHealthCard() {
       <div className="pt-3 border-t space-y-2">
         <div className="flex items-center gap-2 text-sm font-semibold">
           <Database className="size-4" />
-          مزامنة تجريبية (10 أصناف)
+          مزامنة كاملة من Teryaq
         </div>
         <select
           className="w-full h-10 rounded-md border bg-background px-2 text-sm"
@@ -88,7 +88,7 @@ export function TeryaqHealthCard() {
           disabled={!canSync || syncM.isPending}
           className="h-9"
         >
-          {syncM.isPending ? <Loader2 className="size-4 animate-spin" /> : "مزامنة 10 أصناف"}
+          {syncM.isPending ? <Loader2 className="size-4 animate-spin" /> : "مزامنة كل الأصناف"}
         </Button>
         {!healthOk && (
           <div className="text-xs text-muted-foreground">اختبر الاتصال أولاً بنجاح.</div>
