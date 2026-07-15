@@ -94,8 +94,10 @@ export function TeryaqHealthCard() {
           <div className="text-xs text-muted-foreground">اختبر الاتصال أولاً بنجاح.</div>
         )}
         {syncM.data && (
-          <div className="text-xs text-primary">
-            ✓ تمت المزامنة: {syncM.data.items_synced} صنف
+          <div className="text-xs space-y-0.5">
+            <div>مستلَم من Teryaq: {syncM.data.received_from_teryaq}</div>
+            <div>مُطابَق: {syncM.data.mapped_rows}</div>
+            <div className="text-primary">محفوظ: {syncM.data.saved_rows}</div>
           </div>
         )}
         {syncM.error && (
