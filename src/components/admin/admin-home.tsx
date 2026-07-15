@@ -4,7 +4,7 @@ import { useServerFn } from "@tanstack/react-start";
 import { listSessions } from "@/lib/sessions.functions";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Plus, Package, CheckCircle2, Lock } from "lucide-react";
+import { Plus, Package, CheckCircle2, Lock, ClipboardList } from "lucide-react";
 import { TeryaqHealthCard } from "./teryaq-health-card";
 
 export function AdminHome() {
@@ -45,26 +45,31 @@ export function AdminHome() {
         ) : (
           <div className="space-y-2">
             {sessions.map((s) => (
-              <Link key={s.id} to="/app/sessions/$id" params={{ id: s.id }}>
-                <Card className="p-4 flex items-center justify-between gap-3 hover:border-primary transition-colors">
-                  <div className="min-w-0">
-                    <div className="font-semibold truncate">{s.name}</div>
-                    <div className="text-xs text-muted-foreground">
-                      {new Date(s.created_at).toLocaleString("ar")}
-                    </div>
+              <Card key={s.id} className="p-4 flex items-center justify-between gap-3">
+                <Link to="/app/sessions/$id" params={{ id: s.id }} className="min-w-0 flex-1">
+                  <div className="font-semibold truncate">{s.name}</div>
+                  <div className="text-xs text-muted-foreground">
+                    {new Date(s.created_at).toLocaleString("ar")}
                   </div>
-                  <span
-                    className={
-                      s.status === "open"
-                        ? "shrink-0 inline-flex items-center gap-1 text-xs bg-primary/10 text-primary rounded-full px-2 py-1"
-                        : "shrink-0 inline-flex items-center gap-1 text-xs bg-muted text-muted-foreground rounded-full px-2 py-1"
-                    }
-                  >
-                    {s.status === "open" ? <CheckCircle2 className="size-3" /> : <Lock className="size-3" />}
-                    {s.status === "open" ? "مفتوح" : "مغلق"}
-                  </span>
-                </Card>
-              </Link>
+                </Link>
+                <span
+                  className={
+                    s.status === "open"
+                      ? "shrink-0 inline-flex items-center gap-1 text-xs bg-primary/10 text-primary rounded-full px-2 py-1"
+                      : "shrink-0 inline-flex items-center gap-1 text-xs bg-muted text-muted-foreground rounded-full px-2 py-1"
+                  }
+                >
+                  {s.status === "open" ? <CheckCircle2 className="size-3" /> : <Lock className="size-3" />}
+                  {s.status === "open" ? "مفتوح" : "مغلق"}
+                </span>
+                {s.status === "open" && (
+                  <Button asChild size="sm" variant="outline" className="h-9 shrink-0">
+                    <Link to="/app/count/$id" params={{ id: s.id }}>
+                      <ClipboardList className="size-4 ms-1" /> عدّ
+                    </Link>
+                  </Button>
+                )}
+              </Card>
             ))}
           </div>
         )}

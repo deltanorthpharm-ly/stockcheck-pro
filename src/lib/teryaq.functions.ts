@@ -119,6 +119,8 @@ export const syncSessionFromTeryaq = createServerFn({ method: "POST" })
     const limit = data.limit ?? 10;
     const jwt = getBearer();
     let itemsSynced = 0;
+    let receivedFromTeryaq = 0;
+    let mappedRows = 0;
     let errorMsg: string | null = null;
 
     try {
@@ -131,53 +133,63 @@ export const syncSessionFromTeryaq = createServerFn({ method: "POST" })
           `Teryaq /items failed: HTTP ${r.status} ${typeof r.body === "string" ? r.body : JSON.stringify(r.body)}`,
         );
       }
-      const payload = r.body as { items?: Array<Record<string, unknown>> } | Array<Record<string, unknown>>;
-      const items = Array.isArray(payload) ? payload : (payload?.items ?? []);
-      const now = new Date().toISOString();
+      const payload = r.body as { data?: Array<Record<string, unknown>> } | Array<Record<string, unknown>>;
+      const items: Array<Record<string, unknown>> = Array.isArray(payload)
+        ? payload
+        : Array.isArray(payload?.data) ? payload!.data! : [];
+      receivedFromTeryaq = items.length;
+      console.log("[teryaq-sync] received_from_teryaq=", receivedFromTeryaq);
 
       const rows = items.slice(0, limit).map((it, idx) => {
-        const external = String((it["id"] ?? it["itemId"] ?? it["ItemId"]) ?? "");
-        const name = String((it["name"] ?? it["itemName"] ?? it["ItemName"]) ?? external);
-        const barcode = (it["barcode"] ?? it["Barcode"] ?? null) as string | null;
-        const packSizeRaw = it["packSize"] ?? it["PackSize"] ?? null;
-        const packSize = packSizeRaw == null || packSizeRaw === "" ? null : Number(packSizeRaw);
-        const rawQty = it["rawQuantity"] ?? it["RawQuantity"] ?? it["quantity"] ?? null;
-        const rawQuantity = rawQty == null ? null : Number(rawQty);
-        const boxes = it["boxes"] ?? it["Boxes"] ?? null;
-        const units = it["units"] ?? it["Units"] ?? null;
-        const formatted = (it["formattedQuantity"] ?? it["FormattedQuantity"] ?? null) as string | null;
-        const convStatus = (it["conversionStatus"] ?? it["ConversionStatus"] ?? null) as
-          | "ok" | "missing_pack_size" | "negative_stock" | "unavailable" | null;
+        const external = it["itemId"] != null ? String(it["itemId"]) : "";
+        const name = (it["itemName"] as string | undefined) ?? external;
+        const boxesSnap = it["systemBoxes"] == null ? null : Number(it["systemBoxes"]);
+        const unitsSnap = it["systemUnits"] == null ? null : Number(it["systemUnits"]);
         return {
           session_id: data.session_id,
           row_index: idx,
           external_item_id: external,
           item_name_raw: name,
-          barcode: barcode ?? null,
-          pack_size: packSize,
-          raw_quantity_snapshot: rawQuantity,
-          system_boxes_snapshot: boxes == null ? null : Number(boxes),
-          system_units_snapshot: units == null ? null : Number(units),
-          formatted_quantity_snapshot: formatted,
-          conversion_status: convStatus ?? (packSize == null && rawQuantity != null ? "missing_pack_size" : "ok"),
-          source_read_at: now,
+          barcode: (it["barcode"] as string | null) ?? null,
+          selling_price: it["sellingPrice"] == null ? null : Number(it["sellingPrice"]),
+          expiry_date: (it["expiryDate"] as string | null) ?? null,
+          system_quantity_raw: (it["formattedQuantity"] as string | null) ?? null,
+          system_boxes: boxesSnap ?? 0,
+          system_strips: 0,
+          system_units: unitsSnap ?? 0,
+          quantity_parse_status: "ok",
+          pack_size: it["packSize"] == null ? null : Number(it["packSize"]),
+          raw_quantity_snapshot: it["rawQuantity"] == null ? null : Number(it["rawQuantity"]),
+          system_boxes_snapshot: boxesSnap,
+          system_units_snapshot: unitsSnap,
+          formatted_quantity_snapshot: (it["formattedQuantity"] as string | null) ?? null,
+          conversion_status: (it["conversionStatus"] as string | null) ?? null,
+          source_read_at: (it["readAt"] as string | null) ?? new Date().toISOString(),
         };
       }).filter((r) => r.external_item_id);
+      mappedRows = rows.length;
+      console.log("[teryaq-sync] mapped_rows=", mappedRows);
 
       if (rows.length > 0) {
         // Upsert on (session_id, external_item_id)
         const { error: upErr } = await context.supabase
           .from("inventory_items")
           .upsert(rows, { onConflict: "session_id,external_item_id" });
-        if (upErr) throw new Error(upErr.message);
+        if (upErr) {
+          console.error("[teryaq-sync] upsert failed:", upErr.code, upErr.message);
+          throw new Error(`فشل الحفظ في قاعدة البيانات (${upErr.code ?? "?"})`);
+        }
       }
       itemsSynced = rows.length;
+      console.log("[teryaq-sync] saved_rows=", itemsSynced);
 
-      // Mark session as live_api on first successful sync.
-      await context.supabase
-        .from("inventory_sessions")
-        .update({ source_type: "live_api" })
-        .eq("id", data.session_id);
+      // Mark session as live_api on first successful sync (only when we actually saved rows).
+      if (itemsSynced > 0) {
+        await context.supabase
+          .from("inventory_sessions")
+          .update({ source_type: "live_api" })
+          .eq("id", data.session_id);
+      }
     } catch (e) {
       errorMsg = (e as Error).message;
     }
@@ -194,5 +206,11 @@ export const syncSessionFromTeryaq = createServerFn({ method: "POST" })
       .eq("id", run.id);
 
     if (errorMsg) throw new Error(errorMsg);
-    return { run_id: run.id, items_synced: itemsSynced };
+    return {
+      run_id: run.id,
+      items_synced: itemsSynced,
+      received_from_teryaq: receivedFromTeryaq,
+      mapped_rows: mappedRows,
+      saved_rows: itemsSynced,
+    };
   });
