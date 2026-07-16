@@ -169,6 +169,78 @@ function mapTeryaqItemsToInventoryRows(
   }).filter((r) => r.external_item_id);
 }
 
+type InventoryRow = ReturnType<typeof mapTeryaqItemsToInventoryRows>[number];
+
+function getPostgresErrorBody(error: {
+  code?: string;
+  message?: string;
+  details?: string;
+  hint?: string;
+}) {
+  return {
+    code: error.code ?? null,
+    message: error.message ?? null,
+    details: error.details ?? null,
+    hint: error.hint ?? null,
+  };
+}
+
+function findOffendingInventoryValue(
+  rows: InventoryRow[],
+  error: { message?: string; details?: string; hint?: string },
+) {
+  const errorText = [error.message, error.details, error.hint].filter(Boolean).join("\n");
+  const match = errorText.match(/invalid input syntax for type ([^:]+):\s*"([^"]*)"/i);
+  if (!match) return null;
+
+  const pgType = match[1].trim().toLowerCase();
+  const value = match[2];
+  const candidateColumns =
+    pgType.includes("integer")
+      ? [
+          "row_index",
+          "system_boxes",
+          "system_strips",
+          "system_units",
+          "pack_size",
+          "system_boxes_snapshot",
+          "system_units_snapshot",
+        ]
+      : pgType.includes("numeric")
+        ? ["selling_price", "raw_quantity_snapshot"]
+        : pgType.includes("timestamp")
+          ? ["source_read_at"]
+          : [];
+
+  for (const row of rows) {
+    for (const column of candidateColumns) {
+      const rowValue = row[column as keyof InventoryRow];
+      if (rowValue != null && String(rowValue) === value) {
+        return {
+          column,
+          expected_postgres_type: pgType,
+          offending_value: value,
+          first_offending_row: {
+            external_item_id: row.external_item_id,
+            item_name_raw: row.item_name_raw,
+            row_index: row.row_index,
+            raw_quantity_snapshot: row.raw_quantity_snapshot,
+            formatted_quantity_snapshot: row.formatted_quantity_snapshot,
+            conversion_status: row.conversion_status,
+          },
+        };
+      }
+    }
+  }
+
+  return {
+    column: null,
+    expected_postgres_type: pgType,
+    offending_value: value,
+    first_offending_row: null,
+  };
+}
+
 // Admin-only: sync all Teryaq items into a session using paginated batches.
 export const syncSessionFromTeryaq = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
@@ -286,7 +358,16 @@ export const syncSessionFromTeryaq = createServerFn({ method: "POST" })
             .from("inventory_items")
             .upsert(rows, { onConflict: "session_id,external_item_id" });
           if (upErr) {
-            console.error("[teryaq-sync] page upsert failed:", page, upErr.code, upErr.message);
+            const postgresError = getPostgresErrorBody(upErr);
+            const offendingValue = findOffendingInventoryValue(rows, upErr);
+            console.error(
+              "[teryaq-sync] page upsert failed:",
+              JSON.stringify({
+                page,
+                postgresError,
+                offendingValue,
+              }),
+            );
             throw new Error(`Page ${page}: failed to save inventory batch (${upErr.code ?? "?"})`);
           }
 
