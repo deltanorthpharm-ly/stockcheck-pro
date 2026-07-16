@@ -29,6 +29,7 @@ function EmployeesPage() {
   const [displayName, setDisplayName] = useState("");
   const [pin, setPin] = useState(randomPin());
   const [revealed, setRevealed] = useState<Record<string, boolean>>({});
+  const [newPins, setNewPins] = useState<Record<string, string>>({});
 
   const create = useMutation({
     mutationFn: () =>
@@ -116,17 +117,10 @@ function EmployeesPage() {
                 className="h-10 shrink-0"
                 onClick={() => {
                   const p = randomPin();
-                  if (confirm(`إعادة تعيين رقم سري جديد للموظف: ${p}؟`)) {
-                    resetFn({ data: { user_id: e.id, pin: p } })
-                      .then(() => {
-                        toast.success(`رقم سري جديد: ${p}`, { duration: 15000 });
-                        qc.invalidateQueries({ queryKey: ["employees"] });
-                      })
-                      .catch((err: Error) => toast.error(err.message));
-                  }
+                  setNewPins((s) => ({ ...s, [e.id]: p }));
                 }}
               >
-                <KeyRound className="size-4 ms-1" /> إعادة تعيين
+                <KeyRound className="size-4 ms-1" /> توليد رقم
               </Button>
             </div>
 
@@ -147,6 +141,45 @@ function EmployeesPage() {
                   </Button>
                 )}
               </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <Input
+                dir="ltr"
+                inputMode="numeric"
+                maxLength={6}
+                placeholder="رقم سري جديد (6 أرقام)"
+                className="h-10 tracking-widest text-center flex-1"
+                value={newPins[e.id] ?? ""}
+                onChange={(ev) =>
+                  setNewPins((s) => ({
+                    ...s,
+                    [e.id]: ev.target.value.replace(/\D/g, "").slice(0, 6),
+                  }))
+                }
+              />
+              <Button
+                size="sm"
+                className="h-10"
+                disabled={(newPins[e.id] ?? "").length !== 6}
+                onClick={() => {
+                  const p = newPins[e.id] ?? "";
+                  if (p.length !== 6) return;
+                  resetFn({ data: { user_id: e.id, pin: p } })
+                    .then(() => {
+                      toast.success(`تم تعيين الرقم السري: ${p}`, { duration: 15000 });
+                      setNewPins((s) => {
+                        const n = { ...s };
+                        delete n[e.id];
+                        return n;
+                      });
+                      qc.invalidateQueries({ queryKey: ["employees"] });
+                    })
+                    .catch((err: Error) => toast.error(err.message));
+                }}
+              >
+                حفظ
+              </Button>
             </div>
 
             <div className="grid grid-cols-3 gap-2 text-center">
