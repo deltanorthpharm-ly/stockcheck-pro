@@ -19,6 +19,7 @@ type Item = {
   row_index: number;
   item_name_raw: string;
   barcode: string | null;
+  external_item_id: string | null;
   system_boxes: number;
   system_strips: number;
   system_units: number;
@@ -43,7 +44,7 @@ function CountPage() {
       const { data: itemRows, error } = await supabase
         .from("inventory_items")
         .select(
-          "id, session_id, row_index, item_name_raw, barcode, system_boxes, system_strips, system_units, system_quantity_raw, quantity_parse_status",
+          "id, session_id, row_index, item_name_raw, barcode, external_item_id, system_boxes, system_strips, system_units, system_quantity_raw, quantity_parse_status",
         )
         .eq("session_id", id)
         .order("row_index", { ascending: true });
@@ -68,16 +69,23 @@ function CountPage() {
     },
   });
 
+  // Hide items with absolutely zero stock (both boxes and units == 0).
+  // Keep negative-stock items visible for review.
+  const visibleItems = useMemo(
+    () => items.filter((i) => !(i.system_boxes === 0 && i.system_units === 0)),
+    [items],
+  );
+
   const filtered = useMemo(() => {
-    if (!query.trim()) return items;
+    if (!query.trim()) return visibleItems;
     const q = query.trim();
-    return items.filter(
+    return visibleItems.filter(
       (i) => i.item_name_raw.includes(q) || (i.barcode ?? "").includes(q),
     );
-  }, [items, query]);
+  }, [visibleItems, query]);
 
-  const total = items.length;
-  const counted = items.filter((i) => i.current?.status === "approved").length;
+  const total = visibleItems.length;
+  const counted = visibleItems.filter((i) => i.current?.status === "approved").length;
 
   return (
     <div className="flex flex-col">
