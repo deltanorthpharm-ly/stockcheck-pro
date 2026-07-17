@@ -18,6 +18,28 @@ export const saveCount = createServerFn({ method: "POST" })
         phys_units: z.number().int().min(0),
         status: z.enum(["draft", "approved"]),
         client_operation_id: z.string().min(4).max(120),
+        open_snapshot: z
+          .object({
+            raw_quantity: z.number().nullable().optional(),
+            pack_size: z.number().int().nullable().optional(),
+            system_boxes: z.number().int().nullable().optional(),
+            system_units: z.number().int().nullable().optional(),
+            source_read_at: z.string().nullable().optional(),
+            opened_at: z.string().nullable().optional(),
+          })
+          .optional(),
+        submit_snapshot: z
+          .object({
+            raw_quantity: z.number().nullable().optional(),
+            pack_size: z.number().int().nullable().optional(),
+            system_boxes: z.number().int().nullable().optional(),
+            system_units: z.number().int().nullable().optional(),
+            source_read_at: z.string().nullable().optional(),
+            submitted_at: z.string().nullable().optional(),
+          })
+          .optional(),
+        requires_recount: z.boolean().optional(),
+        recount_reason: z.enum(["stock_changed", "pack_size_changed"]).nullable().optional(),
       })
       .parse(input),
   )
@@ -39,6 +61,34 @@ export const saveCount = createServerFn({ method: "POST" })
       .eq("is_current", true)
       .maybeSingle();
 
+    const openCols = data.open_snapshot
+      ? {
+          raw_quantity_at_open: data.open_snapshot.raw_quantity ?? null,
+          pack_size_at_open: data.open_snapshot.pack_size ?? null,
+          system_boxes_at_open: data.open_snapshot.system_boxes ?? null,
+          system_units_at_open: data.open_snapshot.system_units ?? null,
+          source_read_at_open: data.open_snapshot.source_read_at ?? null,
+          opened_at: data.open_snapshot.opened_at ?? null,
+        }
+      : {};
+    const submitCols = data.submit_snapshot
+      ? {
+          raw_quantity_at_submit: data.submit_snapshot.raw_quantity ?? null,
+          pack_size_at_submit: data.submit_snapshot.pack_size ?? null,
+          system_boxes_at_submit: data.submit_snapshot.system_boxes ?? null,
+          system_units_at_submit: data.submit_snapshot.system_units ?? null,
+          source_read_at_submit: data.submit_snapshot.source_read_at ?? null,
+          submitted_at: data.submit_snapshot.submitted_at ?? null,
+        }
+      : {};
+    const recountCols =
+      data.requires_recount !== undefined
+        ? {
+            requires_recount: data.requires_recount,
+            recount_reason: data.recount_reason ?? null,
+          }
+        : {};
+
     if (current && current.status === "draft" && data.status === "draft") {
       // Update the existing draft in place.
       const { error: uErr } = await context.supabase
@@ -48,6 +98,9 @@ export const saveCount = createServerFn({ method: "POST" })
           phys_strips: data.phys_strips,
           phys_units: data.phys_units,
           client_operation_id: data.client_operation_id,
+          ...openCols,
+          ...submitCols,
+          ...recountCols,
         })
         .eq("id", current.id);
       if (uErr) throw new Error(uErr.message);
@@ -76,6 +129,9 @@ export const saveCount = createServerFn({ method: "POST" })
         count_version: (current?.count_version ?? 0) + 1,
         is_current: true,
         client_operation_id: data.client_operation_id,
+        ...openCols,
+        ...submitCols,
+        ...recountCols,
       })
       .select("id")
       .single();
