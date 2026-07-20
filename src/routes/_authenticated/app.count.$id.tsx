@@ -20,6 +20,7 @@ type Item = {
   item_name_raw: string;
   barcode: string | null;
   external_item_id: string | null;
+  pack_size: number | null;
   system_boxes: number;
   system_strips: number;
   system_units: number;
@@ -44,7 +45,7 @@ function CountPage() {
       const { data: itemRows, error } = await supabase
         .from("inventory_items")
         .select(
-          "id, session_id, row_index, item_name_raw, barcode, external_item_id, system_boxes, system_strips, system_units, system_quantity_raw, quantity_parse_status",
+          "id, session_id, row_index, item_name_raw, barcode, external_item_id, pack_size, system_boxes, system_strips, system_units, system_quantity_raw, quantity_parse_status",
         )
         .eq("session_id", id)
         .order("row_index", { ascending: true });
@@ -122,7 +123,7 @@ function CountPage() {
             const phys = it.current
               ? { boxes: it.current.phys_boxes, strips: it.current.phys_strips, units: it.current.phys_units }
               : null;
-            const status = phys ? diffStatus(diffTriple(sys, phys)) : null;
+            const status = phys ? diffStatus(diffTriple(sys, phys, it.pack_size ?? 1)) : null;
             const chip =
               status === "match"
                 ? "bg-success/15 text-success"

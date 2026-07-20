@@ -16,6 +16,7 @@ type Item = {
   session_id: string;
   external_item_id: string | null;
   item_name_raw: string;
+  pack_size: number | null;
   system_boxes: number;
   system_strips: number;
   system_units: number;
@@ -96,10 +97,12 @@ export function CountSheet({
       : { boxes: 0, strips: 0, units: 0 };
   }, [live, item]);
 
+  const displayedPackSize = live?.packSize ?? item?.pack_size ?? 1;
+
   const diff = useMemo(() => {
     if (!item) return { boxes: 0, strips: 0, units: 0 };
-    return diffTriple(displayedSys, { boxes, strips: displayedSys.strips, units });
-  }, [item, boxes, units, displayedSys]);
+    return diffTriple(displayedSys, { boxes, strips: displayedSys.strips, units }, displayedPackSize);
+  }, [item, boxes, units, displayedSys, displayedPackSize]);
 
   const status = useMemo(() => diffStatus(diff), [diff]);
 

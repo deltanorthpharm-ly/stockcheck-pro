@@ -18,7 +18,7 @@ import { useState, useMemo } from "react";
 import { toast } from "sonner";
 import { Upload, Lock, Users, FileDown, BarChart3, ClipboardList } from "lucide-react";
 import { exportRowsToXlsx } from "@/lib/excel-import";
-import { formatQtyArabic } from "@/lib/quantity-parser";
+import { diffStatus, diffTriple, formatQtyArabic } from "@/lib/quantity-parser";
 
 export const Route = createFileRoute("/_authenticated/app/sessions/$id/")({
   component: SessionDetail,
@@ -84,7 +84,7 @@ function SessionDetail() {
     const { data: items } = await supabase
       .from("inventory_items")
       .select(
-        "row_index, item_name_raw, barcode, expiry_date, system_boxes, system_strips, system_units, system_quantity_raw, inventory_counts!left(phys_boxes, phys_strips, phys_units, status, is_current)",
+        "row_index, item_name_raw, barcode, expiry_date, pack_size, system_boxes, system_strips, system_units, system_quantity_raw, inventory_counts!left(phys_boxes, phys_strips, phys_units, status, is_current)",
       )
       .eq("session_id", id)
       .order("row_index", { ascending: true });
@@ -98,16 +98,21 @@ function SessionDetail() {
       const physStr = c
         ? formatQtyArabic({ boxes: c.phys_boxes, strips: c.phys_strips, units: c.phys_units })
         : "";
-      const diffBoxes = c ? c.phys_boxes - it.system_boxes : "";
-      const diffStrips = c ? c.phys_strips - it.system_strips : "";
-      const diffUnits = c ? c.phys_units - it.system_units : "";
+      const diff = c
+        ? diffTriple(
+            { boxes: it.system_boxes, strips: it.system_strips, units: it.system_units },
+            { boxes: c.phys_boxes, strips: c.phys_strips, units: c.phys_units },
+            it.pack_size ?? 1,
+          )
+        : null;
+      const statusValue = diff ? diffStatus(diff) : null;
+      const diffBoxes = diff ? diff.boxes : "";
+      const diffUnits = diff ? diff.units : "";
       const status = !c
         ? "لم يُعد"
-        : diffBoxes === 0 && diffStrips === 0 && diffUnits === 0
+        : statusValue === "match"
           ? "مطابق"
-          : (typeof diffBoxes === "number" && diffBoxes < 0) ||
-              (typeof diffStrips === "number" && diffStrips < 0) ||
-              (typeof diffUnits === "number" && diffUnits < 0)
+          : statusValue === "shortage"
             ? "عجز"
             : "زيادة";
       return {
@@ -118,7 +123,6 @@ function SessionDetail() {
         "الكمية بالنظام": sysStr,
         "الكمية الفعلية": physStr,
         "فرق (علبة)": diffBoxes,
-        "فرق (شريط)": diffStrips,
         "فرق (وحدة)": diffUnits,
         "الحالة": status,
       };
@@ -126,7 +130,7 @@ function SessionDetail() {
     const headers = [
       "الرقم", "اسم الصنف", "الباركود", "الصلاحية",
       "الكمية بالنظام", "الكمية الفعلية",
-      "فرق (علبة)", "فرق (شريط)", "فرق (وحدة)", "الحالة",
+      "فرق (علبة)", "فرق (وحدة)", "الحالة",
     ];
     exportRowsToXlsx(rows, headers, `${session?.name ?? "inventory"}.xlsx`, "التقرير");
   }
