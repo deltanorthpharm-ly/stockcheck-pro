@@ -1,13 +1,16 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 import { CountSheet } from "@/components/employee/count-sheet";
+import { BarcodeScannerSheet } from "@/components/employee/barcode-scanner-sheet";
 import { formatQtyArabic, diffTriple, diffStatus } from "@/lib/quantity-parser";
-import { Search } from "lucide-react";
+import { Camera, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { toast } from "sonner";
 
 export const Route = createFileRoute("/_authenticated/app/count/$id")({
   component: CountPage,
@@ -38,6 +41,7 @@ function CountPage() {
   const { id } = Route.useParams();
   const [openItem, setOpenItem] = useState<Item | null>(null);
   const [query, setQuery] = useState("");
+  const [scannerOpen, setScannerOpen] = useState(false);
 
   const { data: items = [], isLoading, refetch } = useQuery({
     queryKey: ["assigned-items", id],
@@ -91,14 +95,46 @@ function CountPage() {
   const total = visibleItems.length;
   const counted = visibleItems.filter((i) => i.current?.status === "approved").length;
 
+  const handleBarcodeDetected = useCallback((barcode: string) => {
+    const code = barcode.trim();
+    const normalized = code.toLowerCase();
+    setScannerOpen(false);
+    setQuery(code);
+    const matches = visibleItems.filter(
+      (i) =>
+        (i.barcode ?? "").toLowerCase() === normalized ||
+        (i.external_item_id ?? "").toLowerCase() === normalized,
+    );
+    if (matches.length === 1) {
+      toast.success(`تم مسح الباركود: ${code}`);
+      setOpenItem(matches[0]);
+      return;
+    }
+    if (matches.length > 1) {
+      toast.warning("Multiple items share this barcode.");
+      return;
+    }
+    toast.error("Barcode not found in this inventory session.");
+  }, [visibleItems]);
+
   return (
     <div className="flex flex-col">
       <div className="sticky top-14 z-20 bg-background border-b border-border">
         <div className="p-3 space-y-2">
           <div className="relative">
             <Search className="absolute top-1/2 -translate-y-1/2 end-3 size-4 text-muted-foreground" />
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="absolute top-1/2 -translate-y-1/2 start-1.5 h-9 w-9"
+              onClick={() => setScannerOpen(true)}
+              aria-label="مسح الباركود بالكاميرا"
+            >
+              <Camera className="size-5" />
+            </Button>
             <Input
-              className="h-12 pe-10 text-base"
+              className="h-12 pe-10 ps-12 text-base"
               placeholder="ابحث باسم الصنف أو الكود أو الباركود"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
@@ -188,6 +224,11 @@ function CountPage() {
           setOpenItem(null);
           void refetch();
         }}
+      />
+      <BarcodeScannerSheet
+        open={scannerOpen}
+        onClose={() => setScannerOpen(false)}
+        onDetected={handleBarcodeDetected}
       />
     </div>
   );
