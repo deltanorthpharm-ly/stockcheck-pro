@@ -79,9 +79,12 @@ function CountPage() {
 
   const filtered = useMemo(() => {
     if (!query.trim()) return visibleItems;
-    const q = query.trim();
+    const q = query.trim().toLowerCase();
     return visibleItems.filter(
-      (i) => i.item_name_raw.includes(q) || (i.barcode ?? "").includes(q),
+      (i) =>
+        i.item_name_raw.toLowerCase().includes(q) ||
+        (i.barcode ?? "").toLowerCase().includes(q) ||
+        (i.external_item_id ?? "").toLowerCase().includes(q),
     );
   }, [visibleItems, query]);
 
@@ -96,7 +99,7 @@ function CountPage() {
             <Search className="absolute top-1/2 -translate-y-1/2 end-3 size-4 text-muted-foreground" />
             <Input
               className="h-12 pe-10 text-base"
-              placeholder="ابحث باسم الصنف أو الباركود"
+              placeholder="ابحث باسم الصنف أو الكود أو الباركود"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
             />
@@ -124,6 +127,10 @@ function CountPage() {
               ? { boxes: it.current.phys_boxes, strips: it.current.phys_strips, units: it.current.phys_units }
               : null;
             const status = phys ? diffStatus(diffTriple(sys, phys, it.pack_size ?? 1)) : null;
+            const identity = [
+              it.external_item_id ? `Code: ${it.external_item_id}` : null,
+              it.barcode ? `Barcode: ${it.barcode}` : null,
+            ].filter(Boolean).join(" · ");
             const chip =
               status === "match"
                 ? "bg-success/15 text-success"
@@ -147,6 +154,11 @@ function CountPage() {
                     <div className="font-semibold leading-snug text-[15px]">
                       {it.item_name_raw}
                     </div>
+                    {identity && (
+                      <div className="text-[11px] text-muted-foreground mt-0.5" dir="ltr">
+                        {identity}
+                      </div>
+                    )}
                     <div className="text-xs text-muted-foreground mt-1">
                       بالنظام: {it.system_quantity_raw || formatQtyArabic(sys)}
                     </div>
