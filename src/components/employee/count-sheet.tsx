@@ -16,6 +16,8 @@ type Item = {
   session_id: string;
   external_item_id: string | null;
   item_name_raw: string;
+  barcode: string | null;
+  pack_size: number | null;
   system_boxes: number;
   system_strips: number;
   system_units: number;
@@ -96,10 +98,12 @@ export function CountSheet({
       : { boxes: 0, strips: 0, units: 0 };
   }, [live, item]);
 
+  const displayedPackSize = live?.packSize ?? item?.pack_size ?? 1;
+
   const diff = useMemo(() => {
     if (!item) return { boxes: 0, strips: 0, units: 0 };
-    return diffTriple(displayedSys, { boxes, strips: displayedSys.strips, units });
-  }, [item, boxes, units, displayedSys]);
+    return diffTriple(displayedSys, { boxes, strips: displayedSys.strips, units }, displayedPackSize);
+  }, [item, boxes, units, displayedSys, displayedPackSize]);
 
   const status = useMemo(() => diffStatus(diff), [diff]);
 
@@ -222,6 +226,13 @@ export function CountSheet({
               <SheetTitle className="text-base leading-snug text-start">
                 {item.item_name_raw}
               </SheetTitle>
+              {(item.external_item_id || item.barcode) && (
+                <div className="text-xs text-muted-foreground text-start">
+                  {[item.external_item_id ? `Code: ${item.external_item_id}` : null, item.barcode ? `Barcode: ${item.barcode}` : null]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </div>
+              )}
             </SheetHeader>
             <div className="p-4 space-y-4">
               <div className="rounded-2xl bg-muted/50 border border-border p-4">

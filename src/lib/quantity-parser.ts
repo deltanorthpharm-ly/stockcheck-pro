@@ -81,21 +81,53 @@ export function formatQtyArabic(q: { boxes: number; strips: number; units: numbe
   return parts.length ? parts.join(" و") : "٠";
 }
 
-export function diffTriple(
-  sys: { boxes: number; strips: number; units: number },
-  phys: { boxes: number; strips: number; units: number },
-) {
+type QtyInput = { boxes: number; strips?: number; units: number };
+export type QtyDiff = { boxes: number; strips: number; units: number; raw: number };
+
+export function normalizePackSize(packSize: number | null | undefined): number | null {
+  if (packSize == null) return null;
+  if (!Number.isFinite(packSize)) return null;
+  const n = Math.trunc(packSize);
+  return n > 0 ? n : null;
+}
+
+export function qtyToRaw(q: QtyInput, packSize: number | null | undefined): number | null {
+  const p = normalizePackSize(packSize);
+  if (!p) return null;
+  return (q.boxes * p) + q.units;
+}
+
+export function rawToQty(rawQuantity: number, packSize: number | null | undefined): QtyDiff {
+  const p = normalizePackSize(packSize) ?? 1;
+  const abs = Math.abs(rawQuantity);
   return {
-    boxes: phys.boxes - sys.boxes,
-    strips: phys.strips - sys.strips,
-    units: phys.units - sys.units,
+    boxes: Math.floor(abs / p),
+    strips: 0,
+    units: abs % p,
+    raw: rawQuantity,
   };
 }
 
+export function diffTriple(
+  sys: QtyInput,
+  phys: QtyInput,
+  packSize: number | null | undefined = 1,
+): QtyDiff {
+  const p = normalizePackSize(packSize) ?? 1;
+  const systemRaw = (sys.boxes * p) + sys.units;
+  const physicalRaw = (phys.boxes * p) + phys.units;
+  return rawToQty(physicalRaw - systemRaw, p);
+}
+
 export type DiffStatus = "match" | "shortage" | "excess";
-export function diffStatus(d: { boxes: number; strips: number; units: number }): DiffStatus {
-  const anyNeg = d.boxes < 0 || d.strips < 0 || d.units < 0;
-  const anyPos = d.boxes > 0 || d.strips > 0 || d.units > 0;
+export function diffStatus(d: { boxes: number; strips?: number; units: number; raw?: number }): DiffStatus {
+  if (typeof d.raw === "number") {
+    if (d.raw < 0) return "shortage";
+    if (d.raw > 0) return "excess";
+    return "match";
+  }
+  const anyNeg = d.boxes < 0 || (d.strips ?? 0) < 0 || d.units < 0;
+  const anyPos = d.boxes > 0 || (d.strips ?? 0) > 0 || d.units > 0;
   if (anyNeg && !anyPos) return "shortage";
   if (anyPos && !anyNeg) return "excess";
   if (!anyNeg && !anyPos) return "match";

@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { z } from "zod";
+import { diffStatus, normalizePackSize, rawToQty, qtyToRaw } from "@/lib/quantity-parser";
 
 // Save (or approve) a physical count.
 // - When status='draft' we upsert the current draft version.
@@ -61,6 +62,50 @@ export const saveCount = createServerFn({ method: "POST" })
       .eq("is_current", true)
       .maybeSingle();
 
+    const { data: itemRow, error: itemErr } = await context.supabase
+      .from("inventory_items")
+      .select("system_boxes, system_units, pack_size")
+      .eq("id", data.item_id)
+      .eq("session_id", data.session_id)
+      .maybeSingle();
+    if (itemErr) throw new Error(itemErr.message);
+    if (!itemRow) throw new Error("Inventory item not found");
+
+    const packSize =
+      normalizePackSize(data.submit_snapshot?.pack_size) ??
+      normalizePackSize(data.open_snapshot?.pack_size) ??
+      normalizePackSize(itemRow.pack_size);
+    const systemBoxes =
+      data.submit_snapshot?.system_boxes ??
+      data.open_snapshot?.system_boxes ??
+      itemRow.system_boxes;
+    const systemUnits =
+      data.submit_snapshot?.system_units ??
+      data.open_snapshot?.system_units ??
+      itemRow.system_units;
+    const physicalRaw = qtyToRaw({ boxes: data.phys_boxes, units: data.phys_units }, packSize);
+    const systemRaw = qtyToRaw({ boxes: systemBoxes, units: systemUnits }, packSize);
+    const differenceRaw =
+      physicalRaw == null || systemRaw == null ? null : physicalRaw - systemRaw;
+    const differenceQty =
+      differenceRaw == null || !packSize ? null : rawToQty(differenceRaw, packSize);
+    const diffCols =
+      differenceRaw == null || !differenceQty
+        ? {
+            physical_raw_quantity: physicalRaw,
+            difference_raw: null,
+            difference_boxes: null,
+            difference_units: null,
+            diff_status: "conversion_unavailable",
+          }
+        : {
+            physical_raw_quantity: physicalRaw,
+            difference_raw: differenceRaw,
+            difference_boxes: differenceQty.boxes,
+            difference_units: differenceQty.units,
+            diff_status: diffStatus(differenceQty),
+          };
+
     const openCols = data.open_snapshot
       ? {
           raw_quantity_at_open: data.open_snapshot.raw_quantity ?? null,
@@ -98,6 +143,7 @@ export const saveCount = createServerFn({ method: "POST" })
           phys_strips: data.phys_strips,
           phys_units: data.phys_units,
           client_operation_id: data.client_operation_id,
+          ...diffCols,
           ...openCols,
           ...submitCols,
           ...recountCols,
@@ -129,6 +175,7 @@ export const saveCount = createServerFn({ method: "POST" })
         count_version: (current?.count_version ?? 0) + 1,
         is_current: true,
         client_operation_id: data.client_operation_id,
+        ...diffCols,
         ...openCols,
         ...submitCols,
         ...recountCols,
