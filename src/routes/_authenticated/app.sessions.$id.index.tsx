@@ -5,16 +5,17 @@ import {
   getSession,
   getSessionStats,
   closeSession,
-  autoAssignByRange,
-  clearAssignments,
+  assignItemsBatch,
+  returnUncountedItems,
+  transferUncountedItems,
 } from "@/lib/sessions.functions";
 import { listEmployees } from "@/lib/employees.functions";
 import { supabase } from "@/integrations/supabase/client";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
-import { useState, useMemo } from "react";
+import { useState } from "react";
 import { toast } from "sonner";
 import { Upload, Lock, Users, FileDown, BarChart3, ClipboardList } from "lucide-react";
 import { exportRowsToXlsx } from "@/lib/excel-import";
@@ -31,8 +32,9 @@ function SessionDetail() {
   const getSess = useServerFn(getSession);
   const getStats = useServerFn(getSessionStats);
   const listEmps = useServerFn(listEmployees);
-  const doAssign = useServerFn(autoAssignByRange);
-  const doClear = useServerFn(clearAssignments);
+  const doAssign = useServerFn(assignItemsBatch);
+  const doReturn = useServerFn(returnUncountedItems);
+  const doTransfer = useServerFn(transferUncountedItems);
   const doClose = useServerFn(closeSession);
 
   const { data: session } = useQuery({
@@ -49,24 +51,53 @@ function SessionDetail() {
     queryFn: () => listEmps(),
   });
 
-  const [selectedEmps, setSelectedEmps] = useState<string[]>([]);
+  const [batchQty, setBatchQty] = useState<Record<string, string>>({});
+  const [transferTargets, setTransferTargets] = useState<Record<string, string>>({});
+  const [transferQty, setTransferQty] = useState<Record<string, string>>({});
 
   const assign = useMutation({
-    mutationFn: () =>
-      doAssign({ data: { session_id: id, employee_ids: selectedEmps, only_unassigned: false } }),
+    mutationFn: ({ employeeId, quantity }: { employeeId: string; quantity: number }) =>
+      doAssign({ data: { session_id: id, employee_id: employeeId, quantity } }),
     onSuccess: (r) => {
-      toast.success(`تم توزيع ${r.assigned} صنف`);
+      toast.success(`تم إسناد ${r.assigned} صنف`);
       qc.invalidateQueries({ queryKey: ["session-stats", id] });
     },
     onError: (e: Error) => toast.error(e.message),
   });
 
-  const clear = useMutation({
-    mutationFn: () => doClear({ data: { session_id: id } }),
-    onSuccess: () => {
-      toast.success("تم إلغاء كل الإسنادات");
+  const returnItems = useMutation({
+    mutationFn: ({ employeeId }: { employeeId: string }) =>
+      doReturn({ data: { session_id: id, employee_id: employeeId } }),
+    onSuccess: (r) => {
+      toast.success(`تم إرجاع ${r.returned} صنف غير معدود`);
       qc.invalidateQueries({ queryKey: ["session-stats", id] });
     },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const transferItems = useMutation({
+    mutationFn: ({
+      fromEmployeeId,
+      toEmployeeId,
+      quantity,
+    }: {
+      fromEmployeeId: string;
+      toEmployeeId: string;
+      quantity?: number;
+    }) =>
+      doTransfer({
+        data: {
+          session_id: id,
+          from_employee_id: fromEmployeeId,
+          to_employee_id: toEmployeeId,
+          quantity,
+        },
+      }),
+    onSuccess: (r) => {
+      toast.success(`تم نقل ${r.transferred} صنف غير معدود`);
+      qc.invalidateQueries({ queryKey: ["session-stats", id] });
+    },
+    onError: (e: Error) => toast.error(e.message),
   });
 
   const close = useMutation({
@@ -135,9 +166,6 @@ function SessionDetail() {
     exportRowsToXlsx(rows, headers, `${session?.name ?? "inventory"}.xlsx`, "التقرير");
   }
 
-  const toggleEmp = (id: string) =>
-    setSelectedEmps((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
-
   return (
     <div className="p-4 space-y-4">
       <div className="flex items-start justify-between gap-3">
@@ -157,9 +185,9 @@ function SessionDetail() {
 
       <div className="grid grid-cols-2 gap-3">
         <StatBox label="إجمالي الأصناف" value={stats?.total ?? 0} />
+        <StatBox label="غير مسند" value={stats?.unassigned ?? 0} tone="warning" />
         <StatBox label="مُسند" value={stats?.assigned ?? 0} />
-        <StatBox label="تم عدّه" value={stats?.counted ?? 0} tone="success" />
-        <StatBox label="متبقي" value={stats?.remaining ?? 0} tone="warning" />
+        <StatBox label="مكتمل" value={stats?.completed ?? stats?.counted ?? 0} tone="success" />
       </div>
 
       <Card className="p-4 space-y-2">
@@ -173,7 +201,7 @@ function SessionDetail() {
       <Card className="p-4 space-y-3">
         <div className="flex items-center gap-2">
           <Users className="size-4 text-primary" />
-          <div className="font-semibold">توزيع الأصناف على الموظفين</div>
+          <div className="font-semibold">إسناد دفعات للموظفين</div>
         </div>
         {employees.length === 0 ? (
           <div className="text-sm text-muted-foreground">
@@ -185,38 +213,127 @@ function SessionDetail() {
         ) : (
           <>
             <div className="space-y-1">
-              {employees.map((e) => (
-                <label key={e.id} className="flex items-center gap-3 py-2 touch-target">
-                  <Checkbox
-                    checked={selectedEmps.includes(e.id)}
-                    onCheckedChange={() => toggleEmp(e.id)}
-                  />
-                  <div className="text-sm">
-                    <div className="font-medium">{e.display_name}</div>
-                    <div className="text-xs text-muted-foreground">@{e.username}</div>
-                  </div>
-                </label>
-              ))}
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              <Button
-                variant="outline"
-                className="h-11"
-                disabled={clear.isPending}
-                onClick={() => clear.mutate()}
-              >
-                إلغاء الكل
-              </Button>
-              <Button
-                className="h-11"
-                disabled={selectedEmps.length === 0 || assign.isPending}
-                onClick={() => assign.mutate()}
-              >
-                توزيع تلقائي
-              </Button>
+              {employees.map((e) => {
+                const employeeStats = stats?.perEmployee?.find((row) => row.employee_id === e.id);
+                const assignedCount = employeeStats?.assigned ?? 0;
+                const completedCount = employeeStats?.completed ?? 0;
+                const remainingCount = employeeStats?.remaining ?? 0;
+                const qty = Number(batchQty[e.id] ?? 0);
+                const transferTarget = transferTargets[e.id] ?? "";
+                const transferCountText = transferQty[e.id] ?? "";
+                const parsedTransferCount = transferCountText ? Number(transferCountText) : undefined;
+                return (
+                  <Card key={e.id} className="p-3 space-y-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="font-medium truncate">{e.display_name}</div>
+                        <div className="text-xs text-muted-foreground">@{e.username}</div>
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        متبقي: <span className="font-bold text-foreground">{remainingCount}</span>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2 text-center">
+                      <MiniStat label="مسند" value={assignedCount} />
+                      <MiniStat label="مكتمل" value={completedCount} tone="success" />
+                      <MiniStat label="متبقي" value={remainingCount} tone="warning" />
+                    </div>
+                    <div className="flex gap-2">
+                      <Input
+                        inputMode="numeric"
+                        pattern="[0-9]*"
+                        placeholder="عدد الأصناف"
+                        className="h-10 text-center"
+                        value={batchQty[e.id] ?? ""}
+                        onChange={(event) =>
+                          setBatchQty((current) => ({
+                            ...current,
+                            [e.id]: event.target.value.replace(/\D/g, ""),
+                          }))
+                        }
+                      />
+                      <Button
+                        className="h-10 shrink-0"
+                        disabled={
+                          assign.isPending ||
+                          qty <= 0 ||
+                          qty > (stats?.unassigned ?? 0)
+                        }
+                        onClick={() => assign.mutate({ employeeId: e.id, quantity: qty })}
+                      >
+                        إسناد
+                      </Button>
+                    </div>
+                    <div className="grid grid-cols-1 gap-2">
+                      <Button
+                        variant="outline"
+                        className="h-10"
+                        disabled={returnItems.isPending || remainingCount === 0}
+                        onClick={() => returnItems.mutate({ employeeId: e.id })}
+                      >
+                        إرجاع غير المعدود
+                      </Button>
+                      <div className="grid grid-cols-[1fr_auto] gap-2">
+                        <select
+                          className="h-10 rounded-md border border-input bg-background px-2 text-sm"
+                          value={transferTarget}
+                          onChange={(event) =>
+                            setTransferTargets((current) => ({
+                              ...current,
+                              [e.id]: event.target.value,
+                            }))
+                          }
+                        >
+                          <option value="">نقل إلى موظف...</option>
+                          {employees
+                            .filter((employee) => employee.id !== e.id)
+                            .map((employee) => (
+                              <option key={employee.id} value={employee.id}>
+                                {employee.display_name}
+                              </option>
+                            ))}
+                        </select>
+                        <Button
+                          variant="outline"
+                          className="h-10"
+                          disabled={
+                            transferItems.isPending ||
+                            remainingCount === 0 ||
+                            !transferTarget ||
+                            (parsedTransferCount !== undefined &&
+                              (parsedTransferCount <= 0 || parsedTransferCount > remainingCount))
+                          }
+                          onClick={() =>
+                            transferItems.mutate({
+                              fromEmployeeId: e.id,
+                              toEmployeeId: transferTarget,
+                              quantity: parsedTransferCount,
+                            })
+                          }
+                        >
+                          نقل
+                        </Button>
+                      </div>
+                      <Input
+                        inputMode="numeric"
+                        pattern="[0-9]*"
+                        placeholder="عدد النقل اختياري، فارغ = كل المتبقي"
+                        className="h-10 text-center"
+                        value={transferCountText}
+                        onChange={(event) =>
+                          setTransferQty((current) => ({
+                            ...current,
+                            [e.id]: event.target.value.replace(/\D/g, ""),
+                          }))
+                        }
+                      />
+                    </div>
+                  </Card>
+                );
+              })}
             </div>
             <p className="text-xs text-muted-foreground">
-              يتم التوزيع بترتيب صفوف الملف الأصلي ثم يُخزَّن معرّف كل صنف بشكل صريح، بحيث لا يتغيّر مالك الصنف عند إعادة الاستيراد.
+              تبدأ الأصناف غير مسندة. اختر الموظف والعدد المطلوب فقط، ولن يتم نقل الأصناف المكتملة إلا عند إعادة عدّها صراحة.
             </p>
           </>
         )}
@@ -273,5 +390,28 @@ function StatBox({
       <div className={`text-2xl font-bold ${cls}`}>{value.toLocaleString("ar")}</div>
       <div className="text-xs text-muted-foreground">{label}</div>
     </Card>
+  );
+}
+
+function MiniStat({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: number;
+  tone?: "success" | "warning";
+}) {
+  const cls =
+    tone === "success"
+      ? "text-success"
+      : tone === "warning"
+        ? "text-warning-foreground"
+        : "text-foreground";
+  return (
+    <div className="rounded-md border p-2">
+      <div className={`text-base font-bold ${cls}`}>{value.toLocaleString("ar")}</div>
+      <div className="text-[10px] text-muted-foreground">{label}</div>
+    </div>
   );
 }
