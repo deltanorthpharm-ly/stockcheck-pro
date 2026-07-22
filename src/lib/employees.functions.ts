@@ -25,7 +25,11 @@ export const bootstrapAdmin = createServerFn({ method: "POST" })
   });
 
 const usernameRe = /^[a-z0-9_]{3,32}$/;
-const pinRe = /^[0-9]{6}$/;
+const pinRe = /^[0-9]{1,12}$/;
+
+export function pinToAuthPassword(pin: string): string {
+  return `stockcheck-pin:${pin}`;
+}
 
 export const createEmployee = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
@@ -34,7 +38,7 @@ export const createEmployee = createServerFn({ method: "POST" })
       .object({
         username: z.string().regex(usernameRe, "اسم المستخدم: أحرف صغيرة وأرقام فقط، 3-32 حرف"),
         display_name: z.string().min(2).max(80),
-        pin: z.string().regex(pinRe, "الرقم السري: 6 أرقام"),
+        pin: z.string().regex(pinRe, "الرقم السري: أرقام فقط من 1 إلى 12 رقم"),
       })
       .parse(input),
   )
@@ -48,7 +52,7 @@ export const createEmployee = createServerFn({ method: "POST" })
     const email = `${data.username.trim().toLowerCase()}@stockcount.local`;
     const { data: created, error } = await supabaseAdmin.auth.admin.createUser({
       email,
-      password: data.pin,
+      password: pinToAuthPassword(data.pin),
       email_confirm: true,
       user_metadata: { username: data.username, display_name: data.display_name },
     });
@@ -82,7 +86,7 @@ export const resetEmployeePin = createServerFn({ method: "POST" })
     if (!isAdmin) throw new Error("Forbidden: admin only");
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const { error } = await supabaseAdmin.auth.admin.updateUserById(data.user_id, {
-      password: data.pin,
+      password: pinToAuthPassword(data.pin),
     });
     if (error) throw new Error(error.message);
     await supabaseAdmin.from("profiles").update({ pin: data.pin }).eq("id", data.user_id);
@@ -140,3 +144,21 @@ export const listEmployees = createServerFn({ method: "GET" })
       };
     });
   });
+
+export const listLoginEmployees = createServerFn({ method: "GET" }).handler(async () => {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const { data: roleRows, error: rErr } = await supabaseAdmin
+    .from("user_roles")
+    .select("user_id")
+    .eq("role", "employee");
+  if (rErr) throw new Error(rErr.message);
+  const ids = (roleRows ?? []).map((r) => r.user_id);
+  if (ids.length === 0) return [];
+  const { data, error } = await supabaseAdmin
+    .from("profiles")
+    .select("id, username, display_name, created_at")
+    .in("id", ids)
+    .order("display_name", { ascending: true });
+  if (error) throw new Error(error.message);
+  return data ?? [];
+});

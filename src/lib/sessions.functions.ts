@@ -121,63 +121,124 @@ export const closeSession = createServerFn({ method: "POST" })
     return { ok: true };
   });
 
-// Assign items by splitting Excel row order evenly across selected employees.
-// Stores explicit item IDs (via assigned_to) so future re-imports do not
-// reassign items — assignments live on inventory_items.assigned_to.
-export const autoAssignByRange = createServerFn({ method: "POST" })
+async function getCompletedItemIds(supabase: any, sessionId: string): Promise<Set<string>> {
+  const { data, error } = await supabase
+    .from("inventory_counts")
+    .select("item_id")
+    .eq("session_id", sessionId)
+    .eq("status", "approved")
+    .eq("is_current", true);
+  if (error) throw new Error(error.message);
+  return new Set((data ?? []).map((row: { item_id: string }) => row.item_id));
+}
+
+async function getUncountedItemIds(
+  supabase: any,
+  sessionId: string,
+  filters: { assignedTo?: string | null },
+): Promise<string[]> {
+  const completed = await getCompletedItemIds(supabase, sessionId);
+  let query = supabase
+    .from("inventory_items")
+    .select("id, row_index")
+    .eq("session_id", sessionId)
+    .order("row_index", { ascending: true })
+    .order("id", { ascending: true });
+  if (filters.assignedTo === null) {
+    query = query.is("assigned_to", null);
+  } else if (filters.assignedTo) {
+    query = query.eq("assigned_to", filters.assignedTo);
+  }
+  const { data, error } = await query;
+  if (error) throw new Error(error.message);
+  return (data ?? [])
+    .map((row: { id: string }) => row.id)
+    .filter((itemId: string) => !completed.has(itemId));
+}
+
+export const assignItemsBatch = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input) =>
     z
       .object({
         session_id: z.string().uuid(),
-        employee_ids: z.array(z.string().uuid()).min(1),
-        only_unassigned: z.boolean().default(false),
+        employee_id: z.string().uuid(),
+        quantity: z.number().int().positive(),
       })
       .parse(input),
   )
   .handler(async ({ data, context }) => {
     await requireAdmin(context);
-    let query = context.supabase
-      .from("inventory_items")
-      .select("id")
-      .eq("session_id", data.session_id)
-      .order("row_index", { ascending: true });
-    if (data.only_unassigned) query = query.is("assigned_to", null);
-    const { data: items, error } = await query;
-    if (error) throw new Error(error.message);
-    const list = items ?? [];
-    if (list.length === 0) return { assigned: 0 };
-    const perEmp = Math.ceil(list.length / data.employee_ids.length);
-    const updates: Promise<unknown>[] = [];
-    for (let i = 0; i < list.length; i++) {
-      const empIdx = Math.min(Math.floor(i / perEmp), data.employee_ids.length - 1);
-      const emp = data.employee_ids[empIdx];
-      const p = context.supabase
-          .from("inventory_items")
-          .update({ assigned_to: emp })
-          .eq("id", list[i].id);
-      // Cast the builder-thenable to a Promise for parallel awaiting.
-      updates.push(p as unknown as Promise<unknown>);
-      // Batch to avoid too many parallel HTTP calls
-      if (updates.length >= 25) {
-        await Promise.all(updates.splice(0, updates.length));
-      }
+    const availableIds = await getUncountedItemIds(context.supabase, data.session_id, {
+      assignedTo: null,
+    });
+    if (data.quantity > availableIds.length) {
+      throw new Error("العدد المطلوب أكبر من الأصناف غير المسندة");
     }
-    if (updates.length) await Promise.all(updates);
-    return { assigned: list.length };
+    const ids = availableIds.slice(0, data.quantity);
+    if (ids.length === 0) return { assigned: 0 };
+    const { error } = await context.supabase
+      .from("inventory_items")
+      .update({ assigned_to: data.employee_id })
+      .in("id", ids)
+      .is("assigned_to", null);
+    if (error) throw new Error(error.message);
+    return { assigned: ids.length };
   });
 
-export const clearAssignments = createServerFn({ method: "POST" })
+export const returnUncountedItems = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .inputValidator((input) => z.object({ session_id: z.string().uuid() }).parse(input))
+  .inputValidator((input) =>
+    z.object({ session_id: z.string().uuid(), employee_id: z.string().uuid() }).parse(input),
+  )
   .handler(async ({ data, context }) => {
     await requireAdmin(context);
+    const ids = await getUncountedItemIds(context.supabase, data.session_id, {
+      assignedTo: data.employee_id,
+    });
+    if (ids.length === 0) return { returned: 0 };
     const { error } = await context.supabase
       .from("inventory_items")
       .update({ assigned_to: null })
-      .eq("session_id", data.session_id);
+      .in("id", ids)
+      .eq("assigned_to", data.employee_id);
     if (error) throw new Error(error.message);
-    return { ok: true };
+    return { returned: ids.length };
+  });
+
+export const transferUncountedItems = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input) =>
+    z
+      .object({
+        session_id: z.string().uuid(),
+        from_employee_id: z.string().uuid(),
+        to_employee_id: z.string().uuid(),
+        quantity: z.number().int().positive().optional(),
+      })
+      .parse(input),
+  )
+  .handler(async ({ data, context }) => {
+    await requireAdmin(context);
+    if (data.from_employee_id === data.to_employee_id) {
+      throw new Error("اختر موظفاً مختلفاً للنقل");
+    }
+    const availableIds = await getUncountedItemIds(context.supabase, data.session_id, {
+      assignedTo: data.from_employee_id,
+    });
+    const transferCount = data.quantity ?? availableIds.length;
+    if (transferCount > availableIds.length) {
+      throw new Error("العدد المطلوب أكبر من الأصناف المتبقية لدى الموظف");
+    }
+    const ids = availableIds.slice(0, transferCount);
+    if (ids.length === 0) return { transferred: 0 };
+    const { error } = await context.supabase
+      .from("inventory_items")
+      .update({ assigned_to: data.to_employee_id })
+      .in("id", ids)
+      .eq("assigned_to", data.from_employee_id);
+    if (error) throw new Error(error.message);
+    return { transferred: ids.length };
   });
 
 // Progress stats for admin dashboard.
@@ -185,25 +246,40 @@ export const getSessionStats = createServerFn({ method: "GET" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input) => z.object({ session_id: z.string().uuid() }).parse(input))
   .handler(async ({ data, context }) => {
-    const { count: total } = await context.supabase
+    const { data: items, error: iErr } = await context.supabase
       .from("inventory_items")
-      .select("id", { count: "exact", head: true })
+      .select("id, assigned_to")
       .eq("session_id", data.session_id);
-    const { count: assigned } = await context.supabase
-      .from("inventory_items")
-      .select("id", { count: "exact", head: true })
-      .eq("session_id", data.session_id)
-      .not("assigned_to", "is", null);
-    const { count: counted } = await context.supabase
-      .from("inventory_counts")
-      .select("id", { count: "exact", head: true })
-      .eq("session_id", data.session_id)
-      .eq("status", "approved")
-      .eq("is_current", true);
+    if (iErr) throw new Error(iErr.message);
+    const itemRows = (items ?? []) as Array<{ id: string; assigned_to: string | null }>;
+    const completed = await getCompletedItemIds(context.supabase, data.session_id);
+    const total = itemRows.length;
+    const assigned = itemRows.filter((item) => item.assigned_to).length;
+    const counted = itemRows.filter((item) => completed.has(item.id)).length;
+    const perEmployeeMap = new Map<string, { employee_id: string; assigned: number; completed: number; remaining: number }>();
+    for (const item of itemRows) {
+      if (!item.assigned_to) continue;
+      const current = perEmployeeMap.get(item.assigned_to) ?? {
+        employee_id: item.assigned_to,
+        assigned: 0,
+        completed: 0,
+        remaining: 0,
+      };
+      current.assigned += 1;
+      if (completed.has(item.id)) current.completed += 1;
+      perEmployeeMap.set(item.assigned_to, current);
+    }
+    const perEmployee = Array.from(perEmployeeMap.values()).map((employee) => ({
+      ...employee,
+      remaining: employee.assigned - employee.completed,
+    }));
     return {
-      total: total ?? 0,
-      assigned: assigned ?? 0,
-      counted: counted ?? 0,
-      remaining: (total ?? 0) - (counted ?? 0),
+      total,
+      unassigned: total - assigned,
+      assigned,
+      counted,
+      completed: counted,
+      remaining: total - counted,
+      perEmployee,
     };
   });

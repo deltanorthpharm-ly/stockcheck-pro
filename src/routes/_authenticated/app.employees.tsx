@@ -18,6 +18,10 @@ function randomPin() {
   return String(Math.floor(100000 + Math.random() * 900000));
 }
 
+function isValidPin(value: string) {
+  return /^[0-9]{1,12}$/.test(value);
+}
+
 function EmployeesPage() {
   const qc = useQueryClient();
   const listFn = useServerFn(listEmployees);
@@ -76,14 +80,16 @@ function EmployeesPage() {
             />
           </div>
           <div className="space-y-1">
-            <Label htmlFor="p">الرقم السري (٦ أرقام)</Label>
+            <Label htmlFor="p">الرقم السري</Label>
             <div className="flex gap-2">
               <Input
                 id="p"
+                inputMode="numeric"
                 dir="ltr"
                 className="h-11 tracking-widest text-center"
                 value={pin}
-                onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                maxLength={12}
+                onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 12))}
               />
               <Button variant="outline" onClick={() => setPin(randomPin())} className="h-11">
                 توليد
@@ -92,7 +98,7 @@ function EmployeesPage() {
           </div>
           <Button
             className="h-11"
-            disabled={create.isPending}
+            disabled={create.isPending || !isValidPin(pin)}
             onClick={() => create.mutate()}
           >
             {create.isPending ? "جارٍ..." : "إنشاء الحساب"}
@@ -147,24 +153,24 @@ function EmployeesPage() {
               <Input
                 dir="ltr"
                 inputMode="numeric"
-                maxLength={6}
-                placeholder="رقم سري جديد (6 أرقام)"
+                maxLength={12}
+                placeholder="رقم سري جديد"
                 className="h-10 tracking-widest text-center flex-1"
                 value={newPins[e.id] ?? ""}
                 onChange={(ev) =>
                   setNewPins((s) => ({
                     ...s,
-                    [e.id]: ev.target.value.replace(/\D/g, "").slice(0, 6),
+                    [e.id]: ev.target.value.replace(/\D/g, "").slice(0, 12),
                   }))
                 }
               />
               <Button
                 size="sm"
                 className="h-10"
-                disabled={(newPins[e.id] ?? "").length !== 6}
+                disabled={!isValidPin(newPins[e.id] ?? "")}
                 onClick={() => {
                   const p = newPins[e.id] ?? "";
-                  if (p.length !== 6) return;
+                  if (!isValidPin(p)) return;
                   resetFn({ data: { user_id: e.id, pin: p } })
                     .then(() => {
                       toast.success(`تم تعيين الرقم السري: ${p}`, { duration: 15000 });
