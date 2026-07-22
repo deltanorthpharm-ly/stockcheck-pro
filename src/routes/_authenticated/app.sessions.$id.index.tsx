@@ -20,6 +20,7 @@ import { toast } from "sonner";
 import { Upload, Lock, Users, FileDown, BarChart3, ClipboardList } from "lucide-react";
 import { exportRowsToXlsx } from "@/lib/excel-import";
 import { diffStatus, diffTriple, formatQtyArabic } from "@/lib/quantity-parser";
+import { fetchAllSupabasePages } from "@/lib/supabase-pagination";
 
 export const Route = createFileRoute("/_authenticated/app/sessions/$id/")({
   component: SessionDetail,
@@ -112,19 +113,50 @@ function SessionDetail() {
   const percent = stats && stats.total ? Math.round((stats.counted / stats.total) * 100) : 0;
 
   async function exportReport() {
-    const { data: items } = await supabase
-      .from("inventory_items")
-      .select(
-        "row_index, item_name_raw, barcode, expiry_date, pack_size, system_boxes, system_strips, system_units, system_quantity_raw, inventory_counts!left(phys_boxes, phys_strips, phys_units, status, is_current)",
-      )
-      .eq("session_id", id)
-      .order("row_index", { ascending: true });
-    if (!items) return;
-    type Row = typeof items[number];
-    const rows = (items as Row[]).map((it) => {
-      const c = (it.inventory_counts as Array<{ phys_boxes: number; phys_strips: number; phys_units: number; status: string; is_current: boolean }> | null)?.find(
-        (x) => x.is_current && x.status === "approved",
-      );
+    type ExportItemRow = {
+      id: string;
+      row_index: number;
+      item_name_raw: string;
+      barcode: string | null;
+      expiry_date: string | null;
+      pack_size: number | null;
+      system_boxes: number;
+      system_strips: number;
+      system_units: number;
+      system_quantity_raw: string | null;
+    };
+    type ExportCountRow = {
+      item_id: string;
+      phys_boxes: number;
+      phys_strips: number;
+      phys_units: number;
+      status: string;
+      is_current: boolean;
+    };
+    const items = await fetchAllSupabasePages<ExportItemRow>(() =>
+      supabase
+        .from("inventory_items")
+        .select(
+          "id, row_index, item_name_raw, barcode, expiry_date, pack_size, system_boxes, system_strips, system_units, system_quantity_raw",
+        )
+        .eq("session_id", id)
+        .order("row_index", { ascending: true })
+        .order("id", { ascending: true }),
+    );
+    const counts = await fetchAllSupabasePages<ExportCountRow>(() =>
+      supabase
+        .from("inventory_counts")
+        .select("item_id, phys_boxes, phys_strips, phys_units, status, is_current")
+        .eq("session_id", id)
+        .eq("is_current", true)
+        .order("item_id", { ascending: true }),
+    );
+    const countsByItem = new Map<string, ExportCountRow>();
+    for (const count of counts) {
+      if (count.status === "approved") countsByItem.set(count.item_id, count);
+    }
+    const rows = items.map((it) => {
+      const c = countsByItem.get(it.id);
       const sysStr = formatQtyArabic({ boxes: it.system_boxes, strips: it.system_strips, units: it.system_units });
       const physStr = c
         ? formatQtyArabic({ boxes: c.phys_boxes, strips: c.phys_strips, units: c.phys_units })

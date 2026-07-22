@@ -4,6 +4,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { Card } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { formatQtyArabic, diffTriple, diffStatus } from "@/lib/quantity-parser";
+import { fetchAllSupabasePages } from "@/lib/supabase-pagination";
 import { useMemo } from "react";
 
 export const Route = createFileRoute("/_authenticated/app/sessions/$id/report")({
@@ -29,20 +30,48 @@ type Row = {
   }> | null;
 };
 
+type CountRow = {
+  item_id: string;
+  phys_boxes: number;
+  phys_strips: number;
+  phys_units: number;
+  status: string;
+  is_current: boolean;
+};
+
 function ReportPage() {
   const { id } = Route.useParams();
   const { data: rows = [], isLoading } = useQuery<Row[]>({
     queryKey: ["report", id],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("inventory_items")
-        .select(
-          "id, row_index, item_name_raw, barcode, pack_size, system_boxes, system_strips, system_units, system_quantity_raw, inventory_counts!left(phys_boxes, phys_strips, phys_units, status, is_current)",
-        )
-        .eq("session_id", id)
-        .order("row_index", { ascending: true });
-      if (error) throw error;
-      return (data ?? []) as Row[];
+      const items = await fetchAllSupabasePages<Omit<Row, "inventory_counts">>(() =>
+        supabase
+          .from("inventory_items")
+          .select(
+            "id, row_index, item_name_raw, barcode, pack_size, system_boxes, system_strips, system_units, system_quantity_raw",
+          )
+          .eq("session_id", id)
+          .order("row_index", { ascending: true })
+          .order("id", { ascending: true }),
+      );
+      const counts = await fetchAllSupabasePages<CountRow>(() =>
+        supabase
+          .from("inventory_counts")
+          .select("item_id, phys_boxes, phys_strips, phys_units, status, is_current")
+          .eq("session_id", id)
+          .eq("is_current", true)
+          .order("item_id", { ascending: true }),
+      );
+      const countsByItem = new Map<string, CountRow[]>();
+      for (const count of counts) {
+        const list = countsByItem.get(count.item_id) ?? [];
+        list.push(count);
+        countsByItem.set(count.item_id, list);
+      }
+      return items.map((item) => ({
+        ...item,
+        inventory_counts: countsByItem.get(item.id) ?? null,
+      })) as Row[];
     },
   });
 
