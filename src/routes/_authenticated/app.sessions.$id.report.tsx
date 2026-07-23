@@ -310,7 +310,7 @@ function RowList({ rows, kind }: { rows: Row[]; kind: "shortage" | "excess" | "m
   if (rows.length === 0) return <div className="p-6 text-center text-sm text-muted-foreground">لا يوجد</div>;
 
   return (
-    <div className="mt-2 space-y-2">
+    <div className="mt-2 space-y-1.5">
       {rows.map((row) => {
         const count = getApprovedCount(row);
         const systemQty = { boxes: row.system_boxes, strips: row.system_strips, units: row.system_units };
@@ -320,23 +320,28 @@ function RowList({ rows, kind }: { rows: Row[]; kind: "shortage" | "excess" | "m
         const diff = physicalQty ? diffTriple(systemQty, physicalQty, row.pack_size ?? 1) : null;
 
         return (
-          <Card key={row.id} className="space-y-2 p-3">
-            <div className="text-sm font-semibold leading-6">{row.item_name_raw}</div>
-            <div className="grid grid-cols-1 gap-1.5 text-xs sm:grid-cols-2">
-              <InfoLine label="الكود" value={row.external_item_id || "غير مسجل"} dir={row.external_item_id ? "ltr" : "rtl"} />
-              <InfoLine label="الباركود" value={row.barcode || "غير مسجل"} dir={row.barcode ? "ltr" : "rtl"} />
-              <EmployeeLines row={row} />
-              <InfoLine label="رصيد النظام" value={row.system_quantity_raw || formatQtyArabic(systemQty)} />
-              <InfoLine label="العدد الفعلي" value={physicalQty ? formatQtyArabic(physicalQty) : "غير محدد"} />
-              <InfoLine
-                label="الفرق"
-                value={formatDifference(diff)}
-                className={
-                  kind === "shortage" ? "text-destructive" :
-                  kind === "excess" ? "text-info" :
-                  kind === "match" ? "text-success" : undefined
-                }
-              />
+          <Card key={row.id} className="space-y-1.5 p-2.5">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0 flex-1">
+                <div className="text-sm font-semibold leading-5">{row.item_name_raw}</div>
+                <div className="mt-0.5 flex flex-wrap gap-x-2 gap-y-0.5 text-[11px] leading-4 text-muted-foreground">
+                  <span>
+                    الكود: <span dir={row.external_item_id ? "ltr" : "rtl"}>{row.external_item_id || "غير مسجل"}</span>
+                  </span>
+                  <span>
+                    الباركود: <span dir={row.barcode ? "ltr" : "rtl"}>{row.barcode || "غير مسجل"}</span>
+                  </span>
+                </div>
+              </div>
+              <span className={`shrink-0 rounded-full bg-muted/60 px-2 py-0.5 text-xs font-bold leading-5 ${differenceTone(kind)}`}>
+                {formatDifference(diff)}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] leading-4">
+              <CompactMeta label="النظام" value={row.system_quantity_raw || formatQtyArabic(systemQty)} />
+              <CompactMeta label="الفعلي" value={physicalQty ? formatQtyArabic(physicalQty) : "غير محدد"} />
+              <EmployeeMeta row={row} />
             </div>
           </Card>
         );
@@ -369,17 +374,23 @@ function isSameAssignedAndCounted(row: Row) {
   return Boolean(approvedCount?.counted_by && row.assigned_to && approvedCount.counted_by === row.assigned_to);
 }
 
-function EmployeeLines({ row }: { row: Row }) {
+function EmployeeMeta({ row }: { row: Row }) {
   if (isSameAssignedAndCounted(row)) {
-    return <InfoLine label="الموظف" value={getCountedEmployeeName(row)} />;
+    return <CompactMeta label="الموظف" value={getCountedEmployeeName(row)} className="col-span-2" />;
   }
 
   return (
     <>
-      <InfoLine label="المسند إلى" value={getAssignedEmployeeName(row)} />
-      <InfoLine label="تم العد بواسطة" value={getCountedEmployeeName(row)} />
+      <CompactMeta label="المسند" value={getAssignedEmployeeName(row)} />
+      <CompactMeta label="عد بواسطة" value={getCountedEmployeeName(row)} />
     </>
   );
+}
+
+function differenceTone(kind: "shortage" | "excess" | "match" | "none") {
+  if (kind === "shortage") return "text-destructive";
+  if (kind === "excess" || kind === "match") return "text-success";
+  return "text-muted-foreground";
 }
 
 function formatDifference(diff: ReturnType<typeof diffTriple> | null) {
@@ -400,23 +411,19 @@ function safeFilePart(value: string) {
   return value.replace(/[\\/:*?"<>|]+/g, "-").trim() || "report";
 }
 
-function InfoLine({
+function CompactMeta({
   label,
   value,
-  dir = "rtl",
   className = "",
 }: {
   label: string;
   value: string;
-  dir?: "rtl" | "ltr";
   className?: string;
 }) {
   return (
-    <div className="flex items-center justify-between gap-2 rounded-md bg-muted/35 px-2 py-1.5">
-      <span className="shrink-0 text-muted-foreground">{label}:</span>
-      <span dir={dir} className={`min-w-0 truncate font-medium text-foreground ${className}`}>
-        {value}
-      </span>
+    <div className={`min-w-0 ${className}`}>
+      <span className="text-muted-foreground">{label}: </span>
+      <span className="font-medium text-foreground">{value}</span>
     </div>
   );
 }
