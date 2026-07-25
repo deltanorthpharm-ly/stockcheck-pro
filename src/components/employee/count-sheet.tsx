@@ -69,7 +69,7 @@ export function CountSheet({
       if (item.external_item_id) {
         setLiveLoading(true);
         const openedAtIso = new Date().toISOString();
-        fetchLive({ data: { external_item_id: item.external_item_id } })
+        fetchLive({ data: { external_item_id: item.external_item_id, inventory_item_id: item.id } })
           .then((s) => {
             setLive(s);
             setOpenSnap(s);
@@ -116,7 +116,7 @@ export function CountSheet({
       let recount_reason: "stock_changed" | "pack_size_changed" | null = null;
       if (kind === "approved" && item.external_item_id && openSnap) {
         try {
-          submitSnap = await fetchLive({ data: { external_item_id: item.external_item_id } });
+          submitSnap = await fetchLive({ data: { external_item_id: item.external_item_id, inventory_item_id: item.id } });
           if (submitSnap.rawQuantity !== openSnap.rawQuantity) {
             requires_recount = true;
             recount_reason = "stock_changed";
@@ -205,7 +205,7 @@ export function CountSheet({
     setLiveError(null);
     const openedAtIso = new Date().toISOString();
     try {
-      const s = await fetchLive({ data: { external_item_id: item.external_item_id } });
+      const s = await fetchLive({ data: { external_item_id: item.external_item_id, inventory_item_id: item.id } });
       setLive(s);
       setOpenSnap(s);
       setOpenedAt(openedAtIso);
@@ -244,6 +244,11 @@ export function CountSheet({
                     <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
                       <Loader2 className="size-3 animate-spin" />
                       جاري جلب الرصيد الحالي...
+                    </span>
+                  ) : live?.source === "fallback" ? (
+                    <span className="inline-flex items-center gap-1 text-[11px] font-semibold rounded-full px-2 py-0.5 bg-warning/15 text-warning">
+                      <AlertTriangle className="size-3" />
+                      {`رصيد محفوظ — آخر تحديث منذ ${live.ageMinutes} دقيقة`}
                     </span>
                   ) : live ? (
                     <span className="text-[11px] font-semibold rounded-full px-2 py-0.5 bg-success/15 text-success">
