@@ -1,6 +1,9 @@
 import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { z } from "zod";
+import { fetchAllSupabasePages } from "@/lib/supabase-pagination";
+
+const WRITE_CHUNK_SIZE = 500;
 
 const importedRowSchema = z.object({
   row_index: z.number().int().min(1),
@@ -122,14 +125,16 @@ export const closeSession = createServerFn({ method: "POST" })
   });
 
 async function getCompletedItemIds(supabase: any, sessionId: string): Promise<Set<string>> {
-  const { data, error } = await supabase
-    .from("inventory_counts")
-    .select("item_id")
-    .eq("session_id", sessionId)
-    .eq("status", "approved")
-    .eq("is_current", true);
-  if (error) throw new Error(error.message);
-  return new Set((data ?? []).map((row: { item_id: string }) => row.item_id));
+  const data = await fetchAllSupabasePages<{ item_id: string }>(() =>
+    supabase
+      .from("inventory_counts")
+      .select("item_id")
+      .eq("session_id", sessionId)
+      .eq("status", "approved")
+      .eq("is_current", true)
+      .order("item_id", { ascending: true }),
+  );
+  return new Set(data.map((row) => row.item_id));
 }
 
 async function getUncountedItemIds(
@@ -138,22 +143,42 @@ async function getUncountedItemIds(
   filters: { assignedTo?: string | null },
 ): Promise<string[]> {
   const completed = await getCompletedItemIds(supabase, sessionId);
-  let query = supabase
-    .from("inventory_items")
-    .select("id, row_index")
-    .eq("session_id", sessionId)
-    .order("row_index", { ascending: true })
-    .order("id", { ascending: true });
-  if (filters.assignedTo === null) {
-    query = query.is("assigned_to", null);
-  } else if (filters.assignedTo) {
-    query = query.eq("assigned_to", filters.assignedTo);
-  }
-  const { data, error } = await query;
-  if (error) throw new Error(error.message);
-  return (data ?? [])
+  const data = await fetchAllSupabasePages<{ id: string }>(() => {
+    let query = supabase
+      .from("inventory_items")
+      .select("id, row_index")
+      .eq("session_id", sessionId)
+      .order("row_index", { ascending: true })
+      .order("id", { ascending: true });
+    if (filters.assignedTo === null) {
+      query = query.is("assigned_to", null);
+    } else if (filters.assignedTo) {
+      query = query.eq("assigned_to", filters.assignedTo);
+    }
+    return query;
+  });
+  return data
     .map((row: { id: string }) => row.id)
     .filter((itemId: string) => !completed.has(itemId));
+}
+
+async function updateAssignedToInChunks(
+  supabase: any,
+  ids: string[],
+  assignedTo: string | null,
+  guard: { assignedTo?: string | null } = {},
+) {
+  for (let i = 0; i < ids.length; i += WRITE_CHUNK_SIZE) {
+    const chunk = ids.slice(i, i + WRITE_CHUNK_SIZE);
+    let query = supabase.from("inventory_items").update({ assigned_to: assignedTo }).in("id", chunk);
+    if (guard.assignedTo === null) {
+      query = query.is("assigned_to", null);
+    } else if (guard.assignedTo) {
+      query = query.eq("assigned_to", guard.assignedTo);
+    }
+    const { error } = await query;
+    if (error) throw new Error(error.message);
+  }
 }
 
 export const assignItemsBatch = createServerFn({ method: "POST" })
@@ -177,12 +202,7 @@ export const assignItemsBatch = createServerFn({ method: "POST" })
     }
     const ids = availableIds.slice(0, data.quantity);
     if (ids.length === 0) return { assigned: 0 };
-    const { error } = await context.supabase
-      .from("inventory_items")
-      .update({ assigned_to: data.employee_id })
-      .in("id", ids)
-      .is("assigned_to", null);
-    if (error) throw new Error(error.message);
+    await updateAssignedToInChunks(context.supabase, ids, data.employee_id, { assignedTo: null });
     return { assigned: ids.length };
   });
 
@@ -197,12 +217,7 @@ export const returnUncountedItems = createServerFn({ method: "POST" })
       assignedTo: data.employee_id,
     });
     if (ids.length === 0) return { returned: 0 };
-    const { error } = await context.supabase
-      .from("inventory_items")
-      .update({ assigned_to: null })
-      .in("id", ids)
-      .eq("assigned_to", data.employee_id);
-    if (error) throw new Error(error.message);
+    await updateAssignedToInChunks(context.supabase, ids, null, { assignedTo: data.employee_id });
     return { returned: ids.length };
   });
 
@@ -232,12 +247,9 @@ export const transferUncountedItems = createServerFn({ method: "POST" })
     }
     const ids = availableIds.slice(0, transferCount);
     if (ids.length === 0) return { transferred: 0 };
-    const { error } = await context.supabase
-      .from("inventory_items")
-      .update({ assigned_to: data.to_employee_id })
-      .in("id", ids)
-      .eq("assigned_to", data.from_employee_id);
-    if (error) throw new Error(error.message);
+    await updateAssignedToInChunks(context.supabase, ids, data.to_employee_id, {
+      assignedTo: data.from_employee_id,
+    });
     return { transferred: ids.length };
   });
 
@@ -246,12 +258,14 @@ export const getSessionStats = createServerFn({ method: "GET" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input) => z.object({ session_id: z.string().uuid() }).parse(input))
   .handler(async ({ data, context }) => {
-    const { data: items, error: iErr } = await context.supabase
-      .from("inventory_items")
-      .select("id, assigned_to")
-      .eq("session_id", data.session_id);
-    if (iErr) throw new Error(iErr.message);
-    const itemRows = (items ?? []) as Array<{ id: string; assigned_to: string | null }>;
+    const itemRows = await fetchAllSupabasePages<{ id: string; assigned_to: string | null }>(() =>
+      context.supabase
+        .from("inventory_items")
+        .select("id, assigned_to")
+        .eq("session_id", data.session_id)
+        .order("row_index", { ascending: true })
+        .order("id", { ascending: true }),
+    );
     const completed = await getCompletedItemIds(context.supabase, data.session_id);
     const total = itemRows.length;
     const assigned = itemRows.filter((item) => item.assigned_to).length;

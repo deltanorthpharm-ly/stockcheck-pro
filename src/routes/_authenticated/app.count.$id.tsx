@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { CountSheet } from "@/components/employee/count-sheet";
 import { BarcodeScannerSheet } from "@/components/employee/barcode-scanner-sheet";
 import { formatQtyArabic, diffTriple, diffStatus } from "@/lib/quantity-parser";
+import { fetchAllSupabasePages } from "@/lib/supabase-pagination";
 import { Camera, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
@@ -37,6 +38,14 @@ type Item = {
   };
 };
 
+type CountRow = {
+  item_id: string;
+  phys_boxes: number;
+  phys_strips: number;
+  phys_units: number;
+  status: "draft" | "approved";
+};
+
 function CountPage() {
   const { id } = Route.useParams();
   const [openItem, setOpenItem] = useState<Item | null>(null);
@@ -46,23 +55,27 @@ function CountPage() {
   const { data: items = [], isLoading, refetch } = useQuery({
     queryKey: ["assigned-items", id],
     queryFn: async () => {
-      const { data: itemRows, error } = await supabase
-        .from("inventory_items")
-        .select(
-          "id, session_id, row_index, item_name_raw, barcode, external_item_id, pack_size, system_boxes, system_strips, system_units, system_quantity_raw, quantity_parse_status",
-        )
-        .eq("session_id", id)
-        .order("row_index", { ascending: true });
-      if (error) throw error;
-      const ids = (itemRows ?? []).map((r) => r.id);
-      if (ids.length === 0) return [] as Item[];
-      const { data: counts } = await supabase
-        .from("inventory_counts")
-        .select("item_id, phys_boxes, phys_strips, phys_units, status")
-        .in("item_id", ids)
-        .eq("is_current", true);
+      const itemRows = await fetchAllSupabasePages<Item>(() =>
+        supabase
+          .from("inventory_items")
+          .select(
+            "id, session_id, row_index, item_name_raw, barcode, external_item_id, pack_size, system_boxes, system_strips, system_units, system_quantity_raw, quantity_parse_status",
+          )
+          .eq("session_id", id)
+          .order("row_index", { ascending: true })
+          .order("id", { ascending: true }),
+      );
+      if (itemRows.length === 0) return [] as Item[];
+      const counts = await fetchAllSupabasePages<CountRow>(() =>
+        supabase
+          .from("inventory_counts")
+          .select("item_id, phys_boxes, phys_strips, phys_units, status")
+          .eq("session_id", id)
+          .eq("is_current", true)
+          .order("item_id", { ascending: true }),
+      );
       const byItem = new Map<string, Item["current"]>();
-      for (const c of counts ?? []) {
+      for (const c of counts) {
         byItem.set(c.item_id, {
           phys_boxes: c.phys_boxes,
           phys_strips: c.phys_strips,
@@ -70,7 +83,7 @@ function CountPage() {
           status: c.status as "draft" | "approved",
         });
       }
-      return (itemRows ?? []).map((it) => ({ ...it, current: byItem.get(it.id) })) as Item[];
+      return itemRows.map((it) => ({ ...it, current: byItem.get(it.id) })) as Item[];
     },
   });
 

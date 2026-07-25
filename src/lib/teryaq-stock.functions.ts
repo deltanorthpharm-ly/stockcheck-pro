@@ -20,6 +20,9 @@ export type LiveStock = {
   formattedQuantity: string | null;
   packSize: number | null;
   readAt: string;
+  lastLiveRefreshAt: string;
+  source: "live" | "cached" | "fallback";
+  ageMinutes: number;
 };
 
 // Fetch live stock for a single item via the Teryaq proxy.
@@ -28,12 +31,16 @@ export type LiveStock = {
 export const getLiveItemStock = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input) =>
-    z.object({ external_item_id: z.string().min(1).max(64) }).parse(input),
+    z.object({
+      external_item_id: z.string().min(1).max(64),
+      inventory_item_id: z.string().uuid(),
+    }).parse(input),
   )
   .handler(async ({ data }): Promise<LiveStock> => {
     const jwt = getBearer();
-    const url = `${FUNCTIONS_BASE}/items/${encodeURIComponent(data.external_item_id)}/stock`;
-    const res = await fetch(url, {
+    const url = new URL(`${FUNCTIONS_BASE}/items/${encodeURIComponent(data.external_item_id)}/stock`);
+    url.searchParams.set("inventoryItemId", data.inventory_item_id);
+    const res = await fetch(url.toString(), {
       headers: { Authorization: `Bearer ${jwt}`, Accept: "application/json" },
     });
     const text = await res.text();
@@ -59,5 +66,8 @@ export const getLiveItemStock = createServerFn({ method: "POST" })
       formattedQuantity: (src.formattedQuantity as string | null) ?? null,
       packSize: intOrNull(src.packSize),
       readAt: (src.readAt as string | null) ?? new Date().toISOString(),
+      lastLiveRefreshAt: (src.lastLiveRefreshAt as string | null) ?? (src.readAt as string | null) ?? new Date().toISOString(),
+      source: src.source === "cached" || src.source === "fallback" ? src.source : "live",
+      ageMinutes: Number.isFinite(num(src.ageMinutes)) ? num(src.ageMinutes) : 0,
     };
   });
