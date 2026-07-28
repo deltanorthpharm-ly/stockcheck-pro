@@ -327,12 +327,6 @@ async function refreshSharedLiveStock(
     if (!row.external_item_id) throw new Error("missing external item id");
     const fresh = await fetchTeryaqStock(row.external_item_id);
     const refreshedAt = new Date().toISOString();
-    const hasValidIntegers =
-      fresh.systemBoxes != null &&
-      fresh.systemUnits != null &&
-      fresh.rawQuantity != null &&
-      fresh.packSize != null;
-
     const cacheRow = {
       inventory_item_id: row.id,
       session_id: row.session_id,

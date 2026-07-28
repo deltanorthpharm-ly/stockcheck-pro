@@ -71,18 +71,11 @@ export const saveCount = createServerFn({ method: "POST" })
     if (itemErr) throw new Error(itemErr.message);
     if (!itemRow) throw new Error("Inventory item not found");
 
-    const packSize =
-      normalizePackSize(data.submit_snapshot?.pack_size) ??
-      normalizePackSize(data.open_snapshot?.pack_size) ??
-      normalizePackSize(itemRow.pack_size);
-    const systemBoxes =
-      data.submit_snapshot?.system_boxes ??
-      data.open_snapshot?.system_boxes ??
-      itemRow.system_boxes;
-    const systemUnits =
-      data.submit_snapshot?.system_units ??
-      data.open_snapshot?.system_units ??
-      itemRow.system_units;
+    // Difference calculations must remain tied to the fixed session snapshot.
+    // Live open/submit snapshots are stored for audit/recount only.
+    const packSize = normalizePackSize(itemRow.pack_size);
+    const systemBoxes = itemRow.system_boxes;
+    const systemUnits = itemRow.system_units;
     const physicalRaw = qtyToRaw({ boxes: data.phys_boxes, units: data.phys_units }, packSize);
     const systemRaw = qtyToRaw({ boxes: systemBoxes, units: systemUnits }, packSize);
     const differenceRaw =

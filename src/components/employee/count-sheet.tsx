@@ -84,21 +84,15 @@ export function CountSheet({
     }
   }, [item, fetchLive]);
 
-  // Displayed system stock: live when available, else saved snapshot.
+  // Inventory differences must always use the fixed session snapshot.
+  // Live stock is displayed separately and is only used for recount validation.
   const displayedSys = useMemo(() => {
-    if (live) {
-      return {
-        boxes: live.systemBoxes,
-        strips: 0,
-        units: live.systemUnits,
-      };
-    }
     return item
       ? { boxes: item.system_boxes, strips: item.system_strips, units: item.system_units }
       : { boxes: 0, strips: 0, units: 0 };
-  }, [live, item]);
+  }, [item]);
 
-  const displayedPackSize = live?.packSize ?? item?.pack_size ?? 1;
+  const displayedPackSize = item?.pack_size ?? 1;
 
   const diff = useMemo(() => {
     if (!item) return { boxes: 0, strips: 0, units: 0 };
@@ -276,7 +270,7 @@ export function CountSheet({
                 </div>
                 {live?.formattedQuantity && (
                   <div className="text-[11px] text-muted-foreground text-center mt-2">
-                    {live.formattedQuantity}
+                    الرصيد المباشر: {live.formattedQuantity}
                   </div>
                 )}
               </div>

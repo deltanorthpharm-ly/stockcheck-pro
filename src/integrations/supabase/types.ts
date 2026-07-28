@@ -134,6 +134,63 @@ export type Database = {
           },
         ]
       }
+      inventory_item_live_cache: {
+        Row: {
+          external_item_id: string
+          formatted_quantity: string | null
+          inventory_item_id: string
+          last_live_refresh_at: string
+          pack_size: number | null
+          raw_quantity: number | null
+          session_id: string
+          source_read_at: string | null
+          system_boxes: number | null
+          system_units: number | null
+          updated_at: string
+        }
+        Insert: {
+          external_item_id: string
+          formatted_quantity?: string | null
+          inventory_item_id: string
+          last_live_refresh_at?: string
+          pack_size?: number | null
+          raw_quantity?: number | null
+          session_id: string
+          source_read_at?: string | null
+          system_boxes?: number | null
+          system_units?: number | null
+          updated_at?: string
+        }
+        Update: {
+          external_item_id?: string
+          formatted_quantity?: string | null
+          inventory_item_id?: string
+          last_live_refresh_at?: string
+          pack_size?: number | null
+          raw_quantity?: number | null
+          session_id?: string
+          source_read_at?: string | null
+          system_boxes?: number | null
+          system_units?: number | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "inventory_item_live_cache_inventory_item_id_fkey"
+            columns: ["inventory_item_id"]
+            isOneToOne: true
+            referencedRelation: "inventory_items"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "inventory_item_live_cache_session_id_fkey"
+            columns: ["session_id"]
+            isOneToOne: false
+            referencedRelation: "inventory_sessions"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       inventory_items: {
         Row: {
           assigned_to: string | null
