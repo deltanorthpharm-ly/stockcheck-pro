@@ -116,7 +116,7 @@ function SessionDetail() {
     mutationFn: () => doRefreshSnapshot({ data: { session_id: id } }),
     onSuccess: (r) => {
       toast.success(
-        `تم تحديث ${r.updatedItems} صنف. بدون رصيد مباشر: ${r.missingLiveStock}. نتائج تغيرت: ${r.changedCountResults}`,
+        `تم تحديث ${r.updatedNotCountedItems} صنف غير معدود. معتمد متخطى: ${r.skippedApprovedItems}. مسودات متخطاة: ${r.skippedDraftItems}. بدون رصيد مباشر: ${r.missingLiveStock}`,
       );
       qc.invalidateQueries({ queryKey: ["session-stats", id] });
     },
@@ -250,7 +250,7 @@ function SessionDetail() {
             <div className="min-w-0">
               <div className="font-semibold">تعديل الجلسة</div>
               <p className="text-xs text-muted-foreground leading-relaxed">
-                تحديث أرصدة الجلسة ينسخ الرصيد المباشر الحالي مرة واحدة ويغيّر أساس حساب فروقات الجرد.
+                سيتم تحديث أرصدة الأصناف التي لم يتم عدها فقط. الأصناف المعتمدة والمسودات لن تتغير.
               </p>
             </div>
           </div>
@@ -260,7 +260,7 @@ function SessionDetail() {
             disabled={refreshSnapshot.isPending}
             onClick={() => {
               const ok = confirm(
-                "تحذير: هذه العملية ستغيّر Snapshot الجلسة الذي تُحسب عليه فروقات الجرد، وستعيد حساب نتائج الأصناف المعتمدة دون تغيير العدد الفعلي. هل تريد المتابعة؟",
+                "تحذير: سيتم تحديث أرصدة الأصناف التي لم يتم عدها فقط من الرصيد المباشر الحالي. الأصناف المعتمدة والمسودات لن تتغير. هل تريد المتابعة؟",
               );
               if (ok) refreshSnapshot.mutate();
             }}

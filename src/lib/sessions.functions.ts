@@ -2,7 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { z } from "zod";
 import { fetchAllSupabasePages } from "@/lib/supabase-pagination";
-import { diffStatus, normalizePackSize, qtyToRaw, rawToQty, formatQtyArabic } from "@/lib/quantity-parser";
+import { normalizePackSize, qtyToRaw, formatQtyArabic } from "@/lib/quantity-parser";
 
 const WRITE_CHUNK_SIZE = 500;
 const SNAPSHOT_REFRESH_CONCURRENCY = 8;
@@ -62,15 +62,9 @@ type SnapshotRefreshItem = {
   system_units_snapshot: number | null;
 };
 
-type SnapshotRefreshCount = {
-  id: string;
+type SnapshotRefreshCountStatus = {
   item_id: string;
-  phys_boxes: number;
-  phys_units: number;
-  difference_raw: number | null;
-  difference_boxes: number | null;
-  difference_units: number | null;
-  diff_status: string | null;
+  status: "draft" | "approved";
 };
 
 function toNumberOrNull(value: unknown): number | null {
@@ -436,25 +430,33 @@ export const refreshSessionSnapshotFromLive = createServerFn({ method: "POST" })
       }
     });
 
-    const approvedCounts = await fetchAllSupabasePages<SnapshotRefreshCount>(() =>
+    const currentCounts = await fetchAllSupabasePages<SnapshotRefreshCountStatus>(() =>
       context.supabase
         .from("inventory_counts")
-        .select(
-          "id, item_id, phys_boxes, phys_units, difference_raw, difference_boxes, difference_units, diff_status",
-        )
+        .select("item_id, status")
         .eq("session_id", data.session_id)
-        .eq("status", "approved")
         .eq("is_current", true)
         .order("item_id", { ascending: true }),
     );
-    const countsByItem = new Map(approvedCounts.map((count) => [count.item_id, count]));
+    const countStatusByItem = new Map(currentCounts.map((count) => [count.item_id, count.status]));
 
     const audits: Array<Record<string, unknown>> = [];
-    let updatedItems = 0;
+    let updatedNotCountedItems = 0;
+    let skippedApprovedItems = 0;
+    let skippedDraftItems = 0;
     let missingLiveStock = 0;
-    let changedCountResults = 0;
 
     for (const { item, live } of liveResults) {
+      const currentStatus = countStatusByItem.get(item.id);
+      if (currentStatus === "approved") {
+        skippedApprovedItems += 1;
+        continue;
+      }
+      if (currentStatus === "draft") {
+        skippedDraftItems += 1;
+        continue;
+      }
+
       if (!live) {
         missingLiveStock += 1;
         continue;
@@ -517,48 +519,7 @@ export const refreshSessionSnapshotFromLive = createServerFn({ method: "POST" })
         new_raw_quantity_snapshot: nextSystemRaw,
         executed_by: context.userId,
       });
-      updatedItems += 1;
-
-      const count = countsByItem.get(item.id);
-      if (!count) continue;
-
-      const physicalRaw = qtyToRaw(
-        { boxes: count.phys_boxes, units: count.phys_units },
-        nextPackSize,
-      );
-      const differenceRaw =
-        physicalRaw == null || nextSystemRaw == null ? null : physicalRaw - nextSystemRaw;
-      const differenceQty =
-        differenceRaw == null ? null : rawToQty(differenceRaw, nextPackSize);
-      const diffCols =
-        differenceRaw == null || !differenceQty
-          ? {
-              physical_raw_quantity: physicalRaw,
-              difference_raw: null,
-              difference_boxes: null,
-              difference_units: null,
-              diff_status: "conversion_unavailable",
-            }
-          : {
-              physical_raw_quantity: physicalRaw,
-              difference_raw: differenceRaw,
-              difference_boxes: differenceQty.boxes,
-              difference_units: differenceQty.units,
-              diff_status: diffStatus(differenceQty),
-            };
-
-      const countChanged =
-        Number(count.difference_raw ?? NaN) !== Number(diffCols.difference_raw ?? NaN) ||
-        count.difference_boxes !== diffCols.difference_boxes ||
-        count.difference_units !== diffCols.difference_units ||
-        count.diff_status !== diffCols.diff_status;
-
-      const { error: countErr } = await context.supabase
-        .from("inventory_counts")
-        .update(diffCols)
-        .eq("id", count.id);
-      if (countErr) throw new Error(countErr.message);
-      if (countChanged) changedCountResults += 1;
+      updatedNotCountedItems += 1;
     }
 
     for (let i = 0; i < audits.length; i += WRITE_CHUNK_SIZE) {
@@ -570,8 +531,9 @@ export const refreshSessionSnapshotFromLive = createServerFn({ method: "POST" })
     }
 
     return {
-      updatedItems,
+      updatedNotCountedItems,
+      skippedApprovedItems,
+      skippedDraftItems,
       missingLiveStock,
-      changedCountResults,
     };
   });
