@@ -3,7 +3,7 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sh
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useServerFn } from "@tanstack/react-start";
-import { cancelApprovedCount, saveCount } from "@/lib/counts.functions";
+import { cancelApprovedCount, refreshUncountedItemSnapshotOnOpen, saveCount } from "@/lib/counts.functions";
 import { getLiveItemStock, type LiveStock } from "@/lib/teryaq-stock.functions";
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -30,6 +30,14 @@ type Item = {
   };
 };
 
+type SessionSnapshotOverride = {
+  systemBoxes: number;
+  systemUnits: number;
+  rawQuantity: number | null;
+  formattedQuantity: string | null;
+  packSize: number | null;
+};
+
 function makeOpId() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
@@ -40,12 +48,14 @@ export function CountSheet({
   onClose,
   onSaved,
   onCancelled,
+  onSnapshotRefreshed,
 }: {
   item: Item | null;
   isAdmin?: boolean;
   onClose: () => void;
   onSaved: () => void;
   onCancelled?: () => void;
+  onSnapshotRefreshed?: () => void;
 }) {
   const [boxes, setBoxes] = useState(0);
   const [units, setUnits] = useState(0);
@@ -54,6 +64,7 @@ export function CountSheet({
   const [live, setLive] = useState<LiveStock | null>(null);
   const [liveLoading, setLiveLoading] = useState(false);
   const [liveError, setLiveError] = useState<string | null>(null);
+  const [snapshotOverride, setSnapshotOverride] = useState<SessionSnapshotOverride | null>(null);
   const [openSnap, setOpenSnap] = useState<LiveStock | null>(null);
   const [openedAt, setOpenedAt] = useState<string | null>(null);
   const [recountBlock, setRecountBlock] = useState<
@@ -62,6 +73,7 @@ export function CountSheet({
   >(null);
   const save = useServerFn(saveCount);
   const cancelCount = useServerFn(cancelApprovedCount);
+  const refreshSnapshotOnOpen = useServerFn(refreshUncountedItemSnapshotOnOpen);
   const fetchLive = useServerFn(getLiveItemStock);
   const isApproved = item?.current?.status === "approved" && !countCleared;
   const showClearedState = countCleared && !countStarted;
@@ -74,6 +86,7 @@ export function CountSheet({
       setCountStarted(false);
       setLive(null);
       setLiveError(null);
+      setSnapshotOverride(null);
       setOpenSnap(null);
       setRecountBlock(null);
       setOpenedAt(null);
@@ -81,11 +94,37 @@ export function CountSheet({
         setLiveLoading(true);
         const openedAtIso = new Date().toISOString();
         fetchLive({ data: { external_item_id: item.external_item_id, inventory_item_id: item.id } })
-          .then((s) => {
+          .then(async (s) => {
             setLive(s);
             setOpenSnap(s);
             setOpenedAt(openedAtIso);
             setLiveError(null);
+            if (!item.current) {
+              const refreshed = await refreshSnapshotOnOpen({
+                data: {
+                  item_id: item.id,
+                  session_id: item.session_id,
+                  live_snapshot: {
+                    raw_quantity: s.rawQuantity,
+                    pack_size: s.packSize,
+                    system_boxes: s.systemBoxes,
+                    system_units: s.systemUnits,
+                    formatted_quantity: s.formattedQuantity,
+                    source_read_at: s.readAt,
+                  },
+                },
+              });
+              if (refreshed.snapshot) {
+                setSnapshotOverride({
+                  systemBoxes: refreshed.snapshot.system_boxes,
+                  systemUnits: refreshed.snapshot.system_units,
+                  rawQuantity: refreshed.snapshot.raw_quantity_snapshot,
+                  formattedQuantity: refreshed.snapshot.system_quantity_raw,
+                  packSize: refreshed.snapshot.pack_size,
+                });
+                onSnapshotRefreshed?.();
+              }
+            }
           })
           .catch((e: Error) => {
             setLiveError(e.message || "تعذر جلب الرصيد");
@@ -93,7 +132,7 @@ export function CountSheet({
           .finally(() => setLiveLoading(false));
       }
     }
-  }, [item, fetchLive]);
+  }, [item, fetchLive, refreshSnapshotOnOpen, onSnapshotRefreshed]);
 
   // Inventory differences must always use the fixed session snapshot.
   // Live stock is displayed separately and is only used for recount validation.
@@ -101,12 +140,20 @@ export function CountSheet({
     if (countCleared && live) {
       return { boxes: live.systemBoxes, strips: 0, units: live.systemUnits };
     }
+    if (!item?.current && snapshotOverride) {
+      return { boxes: snapshotOverride.systemBoxes, strips: 0, units: snapshotOverride.systemUnits };
+    }
     return item
       ? { boxes: item.system_boxes, strips: item.system_strips, units: item.system_units }
       : { boxes: 0, strips: 0, units: 0 };
-  }, [item, countCleared, live]);
+  }, [item, countCleared, live, snapshotOverride]);
 
-  const displayedPackSize = (countCleared && live?.packSize) ? live.packSize : (item?.pack_size ?? 1);
+  const displayedPackSize =
+    (countCleared && live?.packSize)
+      ? live.packSize
+      : (!item?.current && snapshotOverride?.packSize)
+        ? snapshotOverride.packSize
+        : (item?.pack_size ?? 1);
 
   const diff = useMemo(() => {
     if (!item) return { boxes: 0, strips: 0, units: 0 };

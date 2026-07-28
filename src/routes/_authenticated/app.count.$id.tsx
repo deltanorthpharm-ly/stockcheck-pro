@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { CountSheet } from "@/components/employee/count-sheet";
 import { BarcodeScannerSheet } from "@/components/employee/barcode-scanner-sheet";
 import { formatQtyArabic, diffTriple, diffStatus } from "@/lib/quantity-parser";
+import { formatInventoryDiffBadge, normalizeInventoryDiffStatus } from "@/lib/inventory-diff-display";
 import { fetchAllSupabasePages } from "@/lib/supabase-pagination";
 import { useCurrentUser } from "@/hooks/use-current-user";
 import { Camera, Search } from "lucide-react";
@@ -35,6 +36,12 @@ type Item = {
     phys_boxes: number;
     phys_strips: number;
     phys_units: number;
+    difference_raw?: number | string | null;
+    difference_boxes?: number | null;
+    difference_units?: number | null;
+    diff_status?: string | null;
+    counted_by?: string | null;
+    counted_employee_name?: string | null;
     status: "draft" | "approved";
   };
 };
@@ -44,7 +51,18 @@ type CountRow = {
   phys_boxes: number;
   phys_strips: number;
   phys_units: number;
+  difference_raw: number | string | null;
+  difference_boxes: number | null;
+  difference_units: number | null;
+  diff_status: string | null;
+  counted_by: string | null;
   status: "draft" | "approved";
+};
+
+type ProfileRow = {
+  id: string;
+  display_name: string | null;
+  username: string | null;
 };
 
 function CountPage() {
@@ -72,17 +90,39 @@ function CountPage() {
       const counts = await fetchAllSupabasePages<CountRow>(() =>
         supabase
           .from("inventory_counts")
-          .select("item_id, phys_boxes, phys_strips, phys_units, status")
+          .select("item_id, phys_boxes, phys_strips, phys_units, difference_raw, difference_boxes, difference_units, diff_status, counted_by, status")
           .eq("session_id", id)
           .eq("is_current", true)
           .order("item_id", { ascending: true }),
       );
+      const countedByIds = Array.from(
+        new Set(counts.map((count) => count.counted_by).filter(Boolean) as string[]),
+      );
+      const profilesById = new Map<string, string>();
+      if (countedByIds.length > 0) {
+        const profiles = await fetchAllSupabasePages<ProfileRow>(() =>
+          supabase
+            .from("profiles")
+            .select("id, display_name, username")
+            .in("id", countedByIds)
+            .order("display_name", { ascending: true }),
+        );
+        for (const profile of profiles) {
+          profilesById.set(profile.id, profile.display_name || profile.username || "مستخدم غير معروف");
+        }
+      }
       const byItem = new Map<string, Item["current"]>();
       for (const c of counts) {
         byItem.set(c.item_id, {
           phys_boxes: c.phys_boxes,
           phys_strips: c.phys_strips,
           phys_units: c.phys_units,
+          difference_raw: c.difference_raw,
+          difference_boxes: c.difference_boxes,
+          difference_units: c.difference_units,
+          diff_status: c.diff_status,
+          counted_by: c.counted_by,
+          counted_employee_name: c.counted_by ? profilesById.get(c.counted_by) ?? "مستخدم غير معروف" : null,
           status: c.status as "draft" | "approved",
         });
       }
@@ -133,6 +173,10 @@ function CountPage() {
     toast.error("Barcode not found in this inventory session.");
   }, [visibleItems]);
 
+  const handleSnapshotRefreshed = useCallback(() => {
+    void refetch();
+  }, [refetch]);
+
   return (
     <div className="flex flex-col">
       <div className="sticky top-14 z-20 bg-background border-b border-border">
@@ -178,13 +222,27 @@ function CountPage() {
             const phys = it.current
               ? { boxes: it.current.phys_boxes, strips: it.current.phys_strips, units: it.current.phys_units }
               : null;
-            const status = phys ? diffStatus(diffTriple(sys, phys, it.pack_size ?? 1)) : null;
+            const calculatedStatus = phys ? diffStatus(diffTriple(sys, phys, it.pack_size ?? 1)) : null;
+            const status = normalizeInventoryDiffStatus(it.current?.diff_status) ?? calculatedStatus;
+            const diffBadge = it.current
+              ? formatInventoryDiffBadge(
+                  {
+                    diff_status: it.current.diff_status ?? status,
+                    difference_raw: it.current.difference_raw,
+                    difference_boxes: it.current.difference_boxes,
+                    difference_units: it.current.difference_units,
+                  },
+                  it.pack_size,
+                )
+              : "";
             const identity = [
               it.external_item_id ? `Code: ${it.external_item_id}` : null,
               it.barcode ? `Barcode: ${it.barcode}` : null,
             ].filter(Boolean).join(" · ");
             const chip =
-              status === "match"
+              it.current?.status === "draft"
+                ? "bg-warning/15 text-warning-foreground"
+                : status === "match"
                 ? "bg-success/15 text-success"
                 : status === "shortage"
                   ? "bg-destructive/15 text-destructive"
@@ -211,6 +269,11 @@ function CountPage() {
                         {identity}
                       </div>
                     )}
+                    {it.current?.status === "approved" && (
+                      <div className="text-[11px] text-muted-foreground mt-0.5">
+                        تم الاعتماد بواسطة: {it.current.counted_employee_name || "مستخدم غير معروف"}
+                      </div>
+                    )}
                     <div className="text-xs text-muted-foreground mt-1">
                       بالنظام: {it.system_quantity_raw || formatQtyArabic(sys)}
                     </div>
@@ -220,11 +283,7 @@ function CountPage() {
                       ? "لم يُعد"
                       : it.current.status === "draft"
                         ? "مسودة"
-                        : status === "match"
-                          ? "مطابق"
-                          : status === "shortage"
-                            ? "عجز"
-                            : "زيادة"}
+                        : diffBadge}
                   </span>
                 </div>
               </button>
@@ -244,6 +303,7 @@ function CountPage() {
         onCancelled={() => {
           void refetch();
         }}
+        onSnapshotRefreshed={handleSnapshotRefreshed}
       />
       <BarcodeScannerSheet
         open={scannerOpen}

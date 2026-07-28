@@ -11,6 +11,15 @@ async function requireAdmin(context: { supabase: any; userId: string }) {
   if (!isAdmin) throw new Error("Forbidden: admin only");
 }
 
+const liveSnapshotInput = z.object({
+  raw_quantity: z.number().nullable().optional(),
+  pack_size: z.number().int().nullable().optional(),
+  system_boxes: z.number().int().nullable().optional(),
+  system_units: z.number().int().nullable().optional(),
+  formatted_quantity: z.string().nullable().optional(),
+  source_read_at: z.string().nullable().optional(),
+});
+
 // Save (or approve) a physical count.
 // - When status='draft' we upsert the current draft version.
 // - When status='approved' we mark previous current row as history and insert a new version.
@@ -194,6 +203,75 @@ export const saveCount = createServerFn({ method: "POST" })
       .single();
     if (iErr) throw new Error(iErr.message);
     return { id: inserted.id, deduped: false };
+  });
+
+export const refreshUncountedItemSnapshotOnOpen = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input) =>
+    z
+      .object({
+        item_id: z.string().uuid(),
+        session_id: z.string().uuid(),
+        live_snapshot: liveSnapshotInput,
+      })
+      .parse(input),
+  )
+  .handler(async ({ data, context }) => {
+    const live = data.live_snapshot;
+    if (live.system_boxes == null || live.system_units == null) {
+      throw new Error("الرصيد المباشر غير متاح.");
+    }
+
+    const { data: itemRow, error: itemErr } = await context.supabase
+      .from("inventory_items")
+      .select("pack_size")
+      .eq("id", data.item_id)
+      .eq("session_id", data.session_id)
+      .maybeSingle();
+    if (itemErr) throw new Error(itemErr.message);
+    if (!itemRow) throw new Error("Inventory item not found");
+
+    const nextPackSize = normalizePackSize(live.pack_size) ?? normalizePackSize(itemRow.pack_size);
+    if (!nextPackSize) {
+      throw new Error("لا يمكن تحديث رصيد الجلسة لأن حجم العبوة غير متاح.");
+    }
+
+    const nextRaw =
+      live.raw_quantity ??
+      qtyToRaw({ boxes: live.system_boxes, units: live.system_units }, nextPackSize);
+    const nextFormatted =
+      live.formatted_quantity ??
+      formatQtyArabic({ boxes: live.system_boxes, strips: 0, units: live.system_units });
+
+    const { data: rpcRows, error: rpcErr } = await (context.supabase as any)
+      .rpc("refresh_uncounted_item_snapshot_on_open", {
+        _inventory_item_id: data.item_id,
+        _session_id: data.session_id,
+        _system_boxes: live.system_boxes,
+        _system_units: live.system_units,
+        _system_quantity_raw: nextFormatted,
+        _pack_size: nextPackSize,
+        _raw_quantity_snapshot: nextRaw,
+        _source_read_at: live.source_read_at ?? new Date().toISOString(),
+      });
+    if (rpcErr) throw new Error(rpcErr.message);
+
+    const result = Array.isArray(rpcRows) ? rpcRows[0] : rpcRows;
+    const updated = Boolean(result?.updated);
+
+    return {
+      updated,
+      reason: String(result?.reason ?? (updated ? "updated" : "unknown")),
+      snapshot: updated
+        ? {
+            system_boxes: live.system_boxes,
+            system_units: live.system_units,
+            system_quantity_raw: nextFormatted,
+            pack_size: nextPackSize,
+            raw_quantity_snapshot: nextRaw,
+          }
+        : null,
+    };
   });
 
 export const cancelApprovedCount = createServerFn({ method: "POST" })

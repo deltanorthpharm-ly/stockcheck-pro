@@ -8,6 +8,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { supabase } from "@/integrations/supabase/client";
 import { exportRowsToXlsx } from "@/lib/excel-import";
 import { diffStatus, diffTriple, formatQtyArabic } from "@/lib/quantity-parser";
+import { formatInventoryDiffBadge, normalizeInventoryDiffStatus } from "@/lib/inventory-diff-display";
 import { fetchAllSupabasePages } from "@/lib/supabase-pagination";
 import { FileDown } from "lucide-react";
 
@@ -22,6 +23,10 @@ type CountRow = {
   phys_boxes: number;
   phys_strips: number;
   phys_units: number;
+  difference_raw: number | string | null;
+  difference_boxes: number | null;
+  difference_units: number | null;
+  diff_status: string | null;
   status: string;
   is_current: boolean;
 };
@@ -79,7 +84,7 @@ function ReportPage() {
       const counts = await fetchAllSupabasePages<Omit<CountRow, "counted_employee_name">>(() =>
         supabase
           .from("inventory_counts")
-          .select("item_id, counted_by, phys_boxes, phys_strips, phys_units, status, is_current")
+          .select("item_id, counted_by, phys_boxes, phys_strips, phys_units, difference_raw, difference_boxes, difference_units, diff_status, status, is_current")
           .eq("session_id", id)
           .eq("is_current", true)
           .order("item_id", { ascending: true }),
@@ -162,12 +167,7 @@ function ReportPage() {
         continue;
       }
 
-      const diff = diffTriple(
-        { boxes: row.system_boxes, strips: row.system_strips, units: row.system_units },
-        { boxes: count.phys_boxes, strips: count.phys_strips, units: count.phys_units },
-        row.pack_size ?? 1,
-      );
-      const status = diffStatus(diff);
+      const status = getDisplayStatus(row, count);
 
       if (status === "match") groups.matched.push(row);
       else if (status === "shortage") groups.shortage.push(row);
@@ -317,7 +317,7 @@ function RowList({ rows, kind }: { rows: Row[]; kind: "shortage" | "excess" | "m
         const physicalQty = count
           ? { boxes: count.phys_boxes, strips: count.phys_strips, units: count.phys_units }
           : null;
-        const diff = physicalQty ? diffTriple(systemQty, physicalQty, row.pack_size ?? 1) : null;
+        const diff = count ? getDisplayDiff(row, count) : null;
 
         return (
           <Card key={row.id} className="space-y-1.5 p-2.5">
@@ -334,7 +334,7 @@ function RowList({ rows, kind }: { rows: Row[]; kind: "shortage" | "excess" | "m
                 </div>
               </div>
               <span className={`shrink-0 rounded-full bg-muted/60 px-2 py-0.5 text-xs font-bold leading-5 ${differenceTone(kind)}`}>
-                {formatDifference(diff)}
+                {formatInventoryDiffBadge(diff, row.pack_size)}
               </span>
             </div>
 
@@ -352,6 +352,38 @@ function RowList({ rows, kind }: { rows: Row[]; kind: "shortage" | "excess" | "m
 
 function getApprovedCount(row: Row) {
   return row.inventory_counts?.find((count) => count.is_current && count.status === "approved") ?? null;
+}
+
+function getCalculatedDiff(row: Row, count: CountRow) {
+  return diffTriple(
+    { boxes: row.system_boxes, strips: row.system_strips, units: row.system_units },
+    { boxes: count.phys_boxes, strips: count.phys_strips, units: count.phys_units },
+    row.pack_size ?? 1,
+  );
+}
+
+function getDisplayDiff(row: Row, count: CountRow) {
+  const savedStatus = normalizeInventoryDiffStatus(count.diff_status);
+  if (savedStatus) {
+    return {
+      diff_status: savedStatus,
+      difference_raw: count.difference_raw,
+      difference_boxes: count.difference_boxes,
+      difference_units: count.difference_units,
+    };
+  }
+
+  const calculated = getCalculatedDiff(row, count);
+  return {
+    diff_status: diffStatus(calculated),
+    difference_raw: calculated.raw,
+    difference_boxes: calculated.boxes,
+    difference_units: calculated.units,
+  };
+}
+
+function getDisplayStatus(row: Row, count: CountRow) {
+  return normalizeInventoryDiffStatus(count.diff_status) ?? diffStatus(getCalculatedDiff(row, count));
 }
 
 function getEmployeeName(row: Row) {
@@ -389,7 +421,8 @@ function EmployeeMeta({ row }: { row: Row }) {
 
 function differenceTone(kind: "shortage" | "excess" | "match" | "none") {
   if (kind === "shortage") return "text-destructive";
-  if (kind === "excess" || kind === "match") return "text-success";
+  if (kind === "excess") return "text-info";
+  if (kind === "match") return "text-success";
   return "text-muted-foreground";
 }
 
