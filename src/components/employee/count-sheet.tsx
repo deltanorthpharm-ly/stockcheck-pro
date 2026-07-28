@@ -56,6 +56,7 @@ export function CountSheet({
   >(null);
   const save = useServerFn(saveCount);
   const fetchLive = useServerFn(getLiveItemStock);
+  const isApproved = item?.current?.status === "approved";
 
   useEffect(() => {
     if (item) {
@@ -334,6 +335,7 @@ export function CountSheet({
                   onChange={setBoxes}
                   inputId="qty-boxes"
                   nextId="qty-units"
+                  disabled={isApproved}
                 />
                 <BigQtyCard
                   icon={<Pill className="size-5" />}
@@ -342,6 +344,7 @@ export function CountSheet({
                   onChange={setUnits}
                   inputId="qty-units"
                   nextId="btn-confirm"
+                  disabled={isApproved}
                 />
               </div>
 
@@ -364,7 +367,7 @@ export function CountSheet({
                 <Button
                   variant="outline"
                   className="h-14 text-base"
-                  disabled={mut.isPending || liveLoading}
+                  disabled={isApproved || mut.isPending || liveLoading}
                   onClick={() => mut.mutate("draft")}
                 >
                   حفظ مسودة
@@ -372,10 +375,10 @@ export function CountSheet({
                 <Button
                   id="btn-confirm"
                   className="h-14 font-bold text-base"
-                  disabled={mut.isPending || liveLoading || !!recountBlock}
+                  disabled={isApproved || mut.isPending || liveLoading || !!recountBlock}
                   onClick={() => mut.mutate("approved")}
                 >
-                  اعتماد العدد
+                  {isApproved ? "تم الاعتماد" : "اعتماد العدد"}
                 </Button>
               </div>
               <p className="text-[11px] text-muted-foreground text-center">
@@ -396,6 +399,7 @@ function BigQtyCard({
   onChange,
   inputId,
   nextId,
+  disabled = false,
 }: {
   icon: React.ReactNode;
   title: string;
@@ -403,6 +407,7 @@ function BigQtyCard({
   onChange: (n: number) => void;
   inputId: string;
   nextId: string;
+  disabled?: boolean;
 }) {
   return (
     <div className="rounded-2xl border border-border bg-card p-3 shadow-sm space-y-2">
@@ -417,6 +422,7 @@ function BigQtyCard({
         pattern="[0-9]*"
         enterKeyHint={nextId === "btn-confirm" ? "done" : "next"}
         value={value}
+        disabled={disabled}
         onFocus={(e) => e.currentTarget.select()}
         onChange={(e) =>
           onChange(Math.max(0, parseInt(e.target.value.replace(/\D/g, "") || "0", 10)))
@@ -437,6 +443,7 @@ function BigQtyCard({
           type="button"
           variant="secondary"
           className="h-9 text-sm"
+          disabled={disabled}
           onClick={() => onChange(Math.max(0, value - 1))}
         >
           −1
@@ -445,6 +452,7 @@ function BigQtyCard({
           type="button"
           variant="secondary"
           className="h-9 text-sm"
+          disabled={disabled}
           onClick={() => onChange(value + 1)}
         >
           +1

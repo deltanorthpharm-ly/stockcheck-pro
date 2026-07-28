@@ -45,6 +45,11 @@ export const saveCount = createServerFn({ method: "POST" })
       .parse(input),
   )
   .handler(async ({ data, context }) => {
+    const { data: isAdmin } = await context.supabase.rpc("has_role", {
+      _user_id: context.userId,
+      _role: "admin",
+    });
+
     // Idempotency: return existing row if already saved with this operation id.
     const { data: existing } = await context.supabase
       .from("inventory_counts")
@@ -61,6 +66,10 @@ export const saveCount = createServerFn({ method: "POST" })
       .eq("item_id", data.item_id)
       .eq("is_current", true)
       .maybeSingle();
+
+    if (current?.status === "approved" && !isAdmin) {
+      throw new Error("تم اعتماد هذا الصنف ولا يمكن تعديله.");
+    }
 
     const { data: itemRow, error: itemErr } = await context.supabase
       .from("inventory_items")

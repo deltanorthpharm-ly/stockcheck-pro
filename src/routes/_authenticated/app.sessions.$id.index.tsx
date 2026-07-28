@@ -8,6 +8,7 @@ import {
   assignItemsBatch,
   returnUncountedItems,
   transferUncountedItems,
+  refreshSessionSnapshotFromLive,
 } from "@/lib/sessions.functions";
 import { listEmployees } from "@/lib/employees.functions";
 import { supabase } from "@/integrations/supabase/client";
@@ -17,7 +18,7 @@ import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { useState } from "react";
 import { toast } from "sonner";
-import { Upload, Lock, Users, FileDown, BarChart3, ClipboardList } from "lucide-react";
+import { Upload, Lock, Users, FileDown, BarChart3, ClipboardList, RefreshCw, AlertTriangle } from "lucide-react";
 import { exportRowsToXlsx } from "@/lib/excel-import";
 import { diffStatus, diffTriple, formatQtyArabic } from "@/lib/quantity-parser";
 import { fetchAllSupabasePages } from "@/lib/supabase-pagination";
@@ -37,6 +38,7 @@ function SessionDetail() {
   const doReturn = useServerFn(returnUncountedItems);
   const doTransfer = useServerFn(transferUncountedItems);
   const doClose = useServerFn(closeSession);
+  const doRefreshSnapshot = useServerFn(refreshSessionSnapshotFromLive);
 
   const { data: session } = useQuery({
     queryKey: ["session", id],
@@ -108,6 +110,17 @@ function SessionDetail() {
       qc.invalidateQueries({ queryKey: ["session", id] });
       qc.invalidateQueries({ queryKey: ["sessions"] });
     },
+  });
+
+  const refreshSnapshot = useMutation({
+    mutationFn: () => doRefreshSnapshot({ data: { session_id: id } }),
+    onSuccess: (r) => {
+      toast.success(
+        `تم تحديث ${r.updatedItems} صنف. بدون رصيد مباشر: ${r.missingLiveStock}. نتائج تغيرت: ${r.changedCountResults}`,
+      );
+      qc.invalidateQueries({ queryKey: ["session-stats", id] });
+    },
+    onError: (e: Error) => toast.error(e.message),
   });
 
   const percent = stats && stats.total ? Math.round((stats.counted / stats.total) * 100) : 0;
@@ -229,6 +242,36 @@ function SessionDetail() {
         </div>
         <Progress value={percent} />
       </Card>
+
+      {session?.status === "open" && (
+        <Card className="p-4 space-y-3 border-warning/30 bg-warning/5">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="size-4 text-warning shrink-0 mt-0.5" />
+            <div className="min-w-0">
+              <div className="font-semibold">تعديل الجلسة</div>
+              <p className="text-xs text-muted-foreground leading-relaxed">
+                تحديث أرصدة الجلسة ينسخ الرصيد المباشر الحالي مرة واحدة ويغيّر أساس حساب فروقات الجرد.
+              </p>
+            </div>
+          </div>
+          <Button
+            variant="outline"
+            className="w-full h-11 justify-start"
+            disabled={refreshSnapshot.isPending}
+            onClick={() => {
+              const ok = confirm(
+                "تحذير: هذه العملية ستغيّر Snapshot الجلسة الذي تُحسب عليه فروقات الجرد، وستعيد حساب نتائج الأصناف المعتمدة دون تغيير العدد الفعلي. هل تريد المتابعة؟",
+              );
+              if (ok) refreshSnapshot.mutate();
+            }}
+          >
+            <RefreshCw className="size-4 ms-2" />
+            {refreshSnapshot.isPending
+              ? "جاري تحديث أرصدة الجلسة..."
+              : "تحديث أرصدة الجلسة من الرصيد المباشر"}
+          </Button>
+        </Card>
+      )}
 
       <Card className="p-4 space-y-3">
         <div className="flex items-center gap-2">

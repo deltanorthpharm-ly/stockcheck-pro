@@ -2,8 +2,11 @@ import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { z } from "zod";
 import { fetchAllSupabasePages } from "@/lib/supabase-pagination";
+import { diffStatus, normalizePackSize, qtyToRaw, rawToQty, formatQtyArabic } from "@/lib/quantity-parser";
 
 const WRITE_CHUNK_SIZE = 500;
+const SNAPSHOT_REFRESH_CONCURRENCY = 8;
+const FUNCTIONS_BASE = `${process.env.SUPABASE_URL ?? ""}/functions/v1/teryaq-stockcount-proxy`;
 
 const importedRowSchema = z.object({
   row_index: z.number().int().min(1),
@@ -26,6 +29,112 @@ async function requireAdmin(context: { supabase: any; userId: string }) {
     _role: "admin",
   });
   if (!isAdmin) throw new Error("Forbidden: admin only");
+}
+
+function getBearer(): string {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { getRequestHeader } = require("@tanstack/react-start/server") as {
+    getRequestHeader: (n: string) => string | undefined;
+  };
+  const h = getRequestHeader("authorization") ?? "";
+  return h.replace(/^Bearer\s+/i, "");
+}
+
+type LiveSnapshot = {
+  systemBoxes: number;
+  systemUnits: number;
+  rawQuantity: number | null;
+  formattedQuantity: string | null;
+  packSize: number | null;
+  readAt: string | null;
+};
+
+type SnapshotRefreshItem = {
+  id: string;
+  session_id: string;
+  external_item_id: string | null;
+  pack_size: number | null;
+  system_boxes: number;
+  system_units: number;
+  system_quantity_raw: string | null;
+  raw_quantity_snapshot: number | null;
+  system_boxes_snapshot: number | null;
+  system_units_snapshot: number | null;
+};
+
+type SnapshotRefreshCount = {
+  id: string;
+  item_id: string;
+  phys_boxes: number;
+  phys_units: number;
+  difference_raw: number | null;
+  difference_boxes: number | null;
+  difference_units: number | null;
+  diff_status: string | null;
+};
+
+function toNumberOrNull(value: unknown): number | null {
+  if (value == null) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function toIntegerOrNull(value: unknown): number | null {
+  const n = toNumberOrNull(value);
+  return n != null && Number.isInteger(n) ? n : null;
+}
+
+function normalizeLiveSnapshot(body: unknown): LiveSnapshot | null {
+  const b = (body ?? {}) as Record<string, unknown>;
+  const src = (b.data && typeof b.data === "object" ? b.data : b) as Record<string, unknown>;
+  const systemBoxes = toIntegerOrNull(src.systemBoxes);
+  const systemUnits = toIntegerOrNull(src.systemUnits);
+  if (systemBoxes == null || systemUnits == null) return null;
+  return {
+    systemBoxes,
+    systemUnits,
+    rawQuantity: toNumberOrNull(src.rawQuantity),
+    formattedQuantity: (src.formattedQuantity as string | null) ?? null,
+    packSize: toIntegerOrNull(src.packSize),
+    readAt: (src.readAt as string | null) ?? null,
+  };
+}
+
+async function fetchLiveSnapshot(externalItemId: string, inventoryItemId: string): Promise<LiveSnapshot | null> {
+  if (!FUNCTIONS_BASE) throw new Error("Supabase function URL is not configured");
+  const jwt = getBearer();
+  const url = new URL(`${FUNCTIONS_BASE}/items/${encodeURIComponent(externalItemId)}/stock`);
+  url.searchParams.set("inventoryItemId", inventoryItemId);
+  const res = await fetch(url.toString(), {
+    headers: { Authorization: `Bearer ${jwt}`, Accept: "application/json" },
+  });
+  const text = await res.text();
+  let body: unknown = null;
+  try {
+    body = text ? JSON.parse(text) : null;
+  } catch {
+    body = text;
+  }
+  if (!res.ok || typeof body === "string") return null;
+  return normalizeLiveSnapshot(body);
+}
+
+async function mapWithConcurrency<T, R>(
+  rows: T[],
+  limit: number,
+  mapper: (row: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(rows.length);
+  let index = 0;
+  const workers = Array.from({ length: Math.min(limit, rows.length) }, async () => {
+    while (index < rows.length) {
+      const current = index;
+      index += 1;
+      results[current] = await mapper(rows[current]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 export const createSession = createServerFn({ method: "POST" })
@@ -295,5 +404,174 @@ export const getSessionStats = createServerFn({ method: "GET" })
       completed: counted,
       remaining: total - counted,
       perEmployee,
+    };
+  });
+
+export const refreshSessionSnapshotFromLive = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input) => z.object({ session_id: z.string().uuid() }).parse(input))
+  .handler(async ({ data, context }) => {
+    await requireAdmin(context);
+
+    const items = await fetchAllSupabasePages<SnapshotRefreshItem>(() =>
+      context.supabase
+        .from("inventory_items")
+        .select(
+          "id, session_id, external_item_id, pack_size, system_boxes, system_units, system_quantity_raw, raw_quantity_snapshot, system_boxes_snapshot, system_units_snapshot",
+        )
+        .eq("session_id", data.session_id)
+        .order("row_index", { ascending: true })
+        .order("id", { ascending: true }),
+    );
+
+    const liveResults = await mapWithConcurrency(items, SNAPSHOT_REFRESH_CONCURRENCY, async (item) => {
+      if (!item.external_item_id) return { item, live: null };
+      try {
+        return {
+          item,
+          live: await fetchLiveSnapshot(item.external_item_id, item.id),
+        };
+      } catch {
+        return { item, live: null };
+      }
+    });
+
+    const approvedCounts = await fetchAllSupabasePages<SnapshotRefreshCount>(() =>
+      context.supabase
+        .from("inventory_counts")
+        .select(
+          "id, item_id, phys_boxes, phys_units, difference_raw, difference_boxes, difference_units, diff_status",
+        )
+        .eq("session_id", data.session_id)
+        .eq("status", "approved")
+        .eq("is_current", true)
+        .order("item_id", { ascending: true }),
+    );
+    const countsByItem = new Map(approvedCounts.map((count) => [count.item_id, count]));
+
+    const audits: Array<Record<string, unknown>> = [];
+    let updatedItems = 0;
+    let missingLiveStock = 0;
+    let changedCountResults = 0;
+
+    for (const { item, live } of liveResults) {
+      if (!live) {
+        missingLiveStock += 1;
+        continue;
+      }
+
+      const nextPackSize = normalizePackSize(live.packSize) ?? normalizePackSize(item.pack_size);
+      if (!nextPackSize) {
+        missingLiveStock += 1;
+        continue;
+      }
+
+      const rawFromLive = live.rawQuantity ?? qtyToRaw(
+        { boxes: live.systemBoxes, units: live.systemUnits },
+        nextPackSize,
+      );
+      const nextSystemRaw = rawFromLive == null ? null : Number(rawFromLive);
+      const nextFormatted =
+        live.formattedQuantity ??
+        formatQtyArabic({ boxes: live.systemBoxes, strips: 0, units: live.systemUnits });
+
+      const itemChanged =
+        item.system_boxes !== live.systemBoxes ||
+        item.system_units !== live.systemUnits ||
+        item.pack_size !== nextPackSize ||
+        Number(item.raw_quantity_snapshot ?? NaN) !== Number(nextSystemRaw ?? NaN) ||
+        item.system_quantity_raw !== nextFormatted;
+
+      if (!itemChanged) continue;
+
+      const { error: itemErr } = await context.supabase
+        .from("inventory_items")
+        .update({
+          system_boxes: live.systemBoxes,
+          system_units: live.systemUnits,
+          system_quantity_raw: nextFormatted,
+          pack_size: nextPackSize,
+          raw_quantity_snapshot: nextSystemRaw,
+          system_boxes_snapshot: live.systemBoxes,
+          system_units_snapshot: live.systemUnits,
+          formatted_quantity_snapshot: nextFormatted,
+          conversion_status: nextSystemRaw != null && nextSystemRaw < 0 ? "negative_stock" : "ok",
+          source_read_at: live.readAt,
+        })
+        .eq("id", item.id)
+        .eq("session_id", data.session_id);
+      if (itemErr) throw new Error(itemErr.message);
+
+      audits.push({
+        session_id: data.session_id,
+        inventory_item_id: item.id,
+        old_system_boxes: item.system_boxes,
+        old_system_units: item.system_units,
+        old_system_quantity_raw: item.system_quantity_raw,
+        old_pack_size: item.pack_size,
+        old_raw_quantity_snapshot: item.raw_quantity_snapshot,
+        new_system_boxes: live.systemBoxes,
+        new_system_units: live.systemUnits,
+        new_system_quantity_raw: nextFormatted,
+        new_pack_size: nextPackSize,
+        new_raw_quantity_snapshot: nextSystemRaw,
+        executed_by: context.userId,
+      });
+      updatedItems += 1;
+
+      const count = countsByItem.get(item.id);
+      if (!count) continue;
+
+      const physicalRaw = qtyToRaw(
+        { boxes: count.phys_boxes, units: count.phys_units },
+        nextPackSize,
+      );
+      const differenceRaw =
+        physicalRaw == null || nextSystemRaw == null ? null : physicalRaw - nextSystemRaw;
+      const differenceQty =
+        differenceRaw == null ? null : rawToQty(differenceRaw, nextPackSize);
+      const diffCols =
+        differenceRaw == null || !differenceQty
+          ? {
+              physical_raw_quantity: physicalRaw,
+              difference_raw: null,
+              difference_boxes: null,
+              difference_units: null,
+              diff_status: "conversion_unavailable",
+            }
+          : {
+              physical_raw_quantity: physicalRaw,
+              difference_raw: differenceRaw,
+              difference_boxes: differenceQty.boxes,
+              difference_units: differenceQty.units,
+              diff_status: diffStatus(differenceQty),
+            };
+
+      const countChanged =
+        Number(count.difference_raw ?? NaN) !== Number(diffCols.difference_raw ?? NaN) ||
+        count.difference_boxes !== diffCols.difference_boxes ||
+        count.difference_units !== diffCols.difference_units ||
+        count.diff_status !== diffCols.diff_status;
+
+      const { error: countErr } = await context.supabase
+        .from("inventory_counts")
+        .update(diffCols)
+        .eq("id", count.id);
+      if (countErr) throw new Error(countErr.message);
+      if (countChanged) changedCountResults += 1;
+    }
+
+    for (let i = 0; i < audits.length; i += WRITE_CHUNK_SIZE) {
+      const chunk = audits.slice(i, i + WRITE_CHUNK_SIZE);
+      const { error } = await (context.supabase as any)
+        .from("inventory_snapshot_refresh_audit")
+        .insert(chunk);
+      if (error) throw new Error(error.message);
+    }
+
+    return {
+      updatedItems,
+      missingLiveStock,
+      changedCountResults,
     };
   });
