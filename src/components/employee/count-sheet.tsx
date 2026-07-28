@@ -232,28 +232,8 @@ export function CountSheet({
               <div className="rounded-2xl bg-muted/50 border border-border p-4">
                 <div className="flex items-center justify-between mb-2">
                   <div className="text-[11px] font-semibold text-muted-foreground text-start">
-                    المخزون بالنظام
+                    رصيد الجلسة
                   </div>
-                  {liveLoading ? (
-                    <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
-                      <Loader2 className="size-3 animate-spin" />
-                      جاري جلب الرصيد الحالي...
-                    </span>
-                  ) : live?.source === "fallback" ? (
-                    <span className="inline-flex items-center gap-1 text-[11px] font-semibold rounded-full px-2 py-0.5 bg-warning/15 text-warning">
-                      <AlertTriangle className="size-3" />
-                      {`رصيد محفوظ — آخر تحديث منذ ${live.ageMinutes} دقيقة`}
-                    </span>
-                  ) : live ? (
-                    <span className="text-[11px] font-semibold rounded-full px-2 py-0.5 bg-success/15 text-success">
-                      مباشر
-                    </span>
-                  ) : liveError ? (
-                    <span className="inline-flex items-center gap-1 text-[11px] font-semibold rounded-full px-2 py-0.5 bg-warning/15 text-warning">
-                      <AlertTriangle className="size-3" />
-                      رصيد محفوظ — ليس مباشرًا
-                    </span>
-                  ) : null}
                 </div>
                 <div className="flex items-center justify-around gap-3">
                   <div className="flex items-center gap-2">
@@ -268,12 +248,61 @@ export function CountSheet({
                     <span className="text-xs text-muted-foreground">وحدة</span>
                   </div>
                 </div>
-                {live?.formattedQuantity && (
-                  <div className="text-[11px] text-muted-foreground text-center mt-2">
-                    الرصيد المباشر: {live.formattedQuantity}
-                  </div>
-                )}
               </div>
+
+              {(liveLoading || live || liveError) && (
+                <div className="rounded-2xl border border-border bg-background p-3 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-[11px] font-semibold text-muted-foreground">
+                      الرصيد المباشر الحالي
+                    </div>
+                    {liveLoading ? (
+                      <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+                        <Loader2 className="size-3 animate-spin" />
+                        جاري التحديث...
+                      </span>
+                    ) : live?.source === "fallback" ? (
+                      <span className="inline-flex items-center gap-1 text-[11px] font-semibold rounded-full px-2 py-0.5 bg-warning/15 text-warning">
+                        <AlertTriangle className="size-3" />
+                        {`رصيد محفوظ — آخر تحديث منذ ${live.ageMinutes} دقيقة`}
+                      </span>
+                    ) : live ? (
+                      <span className="text-[11px] font-semibold rounded-full px-2 py-0.5 bg-success/15 text-success">
+                        مباشر
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 text-[11px] font-semibold rounded-full px-2 py-0.5 bg-warning/15 text-warning">
+                        <AlertTriangle className="size-3" />
+                        غير متاح الآن
+                      </span>
+                    )}
+                  </div>
+                  {live ? (
+                    <div className="flex items-center justify-around gap-3">
+                      <div className="flex items-center gap-2">
+                        <Package className="size-4 text-muted-foreground" />
+                        <span className="text-base font-bold tabular-nums">{live.systemBoxes}</span>
+                        <span className="text-xs text-muted-foreground">علبة</span>
+                      </div>
+                      <div className="h-7 w-px bg-border" />
+                      <div className="flex items-center gap-2">
+                        <Pill className="size-4 text-muted-foreground" />
+                        <span className="text-base font-bold tabular-nums">{live.systemUnits}</span>
+                        <span className="text-xs text-muted-foreground">وحدة</span>
+                      </div>
+                    </div>
+                  ) : liveError ? (
+                    <div className="text-[11px] text-muted-foreground text-center">
+                      يتم استخدام رصيد الجلسة للحساب. الرصيد المباشر للعرض فقط.
+                    </div>
+                  ) : null}
+                  {live?.formattedQuantity && (
+                    <div className="text-[11px] text-muted-foreground text-center">
+                      {live.formattedQuantity}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {recountBlock && (
                 <div className="rounded-xl border border-destructive/40 bg-destructive/10 p-3 space-y-2">
