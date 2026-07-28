@@ -3,7 +3,7 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sh
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useServerFn } from "@tanstack/react-start";
-import { saveCount } from "@/lib/counts.functions";
+import { cancelApprovedCount, saveCount } from "@/lib/counts.functions";
 import { getLiveItemStock, type LiveStock } from "@/lib/teryaq-stock.functions";
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -36,15 +36,21 @@ function makeOpId() {
 
 export function CountSheet({
   item,
+  isAdmin = false,
   onClose,
   onSaved,
+  onCancelled,
 }: {
   item: Item | null;
+  isAdmin?: boolean;
   onClose: () => void;
   onSaved: () => void;
+  onCancelled?: () => void;
 }) {
   const [boxes, setBoxes] = useState(0);
   const [units, setUnits] = useState(0);
+  const [countCleared, setCountCleared] = useState(false);
+  const [countStarted, setCountStarted] = useState(false);
   const [live, setLive] = useState<LiveStock | null>(null);
   const [liveLoading, setLiveLoading] = useState(false);
   const [liveError, setLiveError] = useState<string | null>(null);
@@ -55,13 +61,17 @@ export function CountSheet({
     | { reason: "stock_changed" | "pack_size_changed"; submit: LiveStock }
   >(null);
   const save = useServerFn(saveCount);
+  const cancelCount = useServerFn(cancelApprovedCount);
   const fetchLive = useServerFn(getLiveItemStock);
-  const isApproved = item?.current?.status === "approved";
+  const isApproved = item?.current?.status === "approved" && !countCleared;
+  const showClearedState = countCleared && !countStarted;
 
   useEffect(() => {
     if (item) {
       setBoxes(item.current?.phys_boxes ?? 0);
       setUnits(item.current?.phys_units ?? 0);
+      setCountCleared(false);
+      setCountStarted(false);
       setLive(null);
       setLiveError(null);
       setOpenSnap(null);
@@ -88,12 +98,15 @@ export function CountSheet({
   // Inventory differences must always use the fixed session snapshot.
   // Live stock is displayed separately and is only used for recount validation.
   const displayedSys = useMemo(() => {
+    if (countCleared && live) {
+      return { boxes: live.systemBoxes, strips: 0, units: live.systemUnits };
+    }
     return item
       ? { boxes: item.system_boxes, strips: item.system_strips, units: item.system_units }
       : { boxes: 0, strips: 0, units: 0 };
-  }, [item]);
+  }, [item, countCleared, live]);
 
-  const displayedPackSize = item?.pack_size ?? 1;
+  const displayedPackSize = (countCleared && live?.packSize) ? live.packSize : (item?.pack_size ?? 1);
 
   const diff = useMemo(() => {
     if (!item) return { boxes: 0, strips: 0, units: 0 };
@@ -101,6 +114,41 @@ export function CountSheet({
   }, [item, boxes, units, displayedSys, displayedPackSize]);
 
   const status = useMemo(() => diffStatus(diff), [diff]);
+
+  const cancelMut = useMutation({
+    mutationFn: async () => {
+      if (!item) return;
+      return cancelCount({
+        data: {
+          item_id: item.id,
+          session_id: item.session_id,
+          live_snapshot: live
+            ? {
+                raw_quantity: live.rawQuantity,
+                pack_size: live.packSize,
+                system_boxes: live.systemBoxes,
+                system_units: live.systemUnits,
+                formatted_quantity: live.formattedQuantity,
+                source_read_at: live.readAt,
+              }
+            : undefined,
+        },
+      });
+    },
+    onSuccess: () => {
+      setBoxes(0);
+      setUnits(0);
+      setCountStarted(false);
+      setCountCleared(true);
+      if (live) {
+        setOpenSnap(live);
+        setOpenedAt(new Date().toISOString());
+      }
+      toast.success("تم إلغاء اعتماد الصنف");
+      onCancelled?.();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
 
   const mut = useMutation({
     mutationFn: async (kind: "draft" | "approved") => {
@@ -230,26 +278,28 @@ export function CountSheet({
               )}
             </SheetHeader>
             <div className="p-4 space-y-4">
-              <div className="rounded-2xl bg-muted/50 border border-border p-4">
-                <div className="flex items-center justify-between mb-2">
-                  <div className="text-[11px] font-semibold text-muted-foreground text-start">
-                    رصيد الجلسة
+              {!countCleared && (
+                <div className="rounded-2xl bg-muted/50 border border-border p-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="text-[11px] font-semibold text-muted-foreground text-start">
+                      رصيد الجلسة
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-around gap-3">
+                    <div className="flex items-center gap-2">
+                      <Package className="size-5 text-primary" />
+                      <span className="text-lg font-bold tabular-nums">{displayedSys.boxes}</span>
+                      <span className="text-xs text-muted-foreground">علبة</span>
+                    </div>
+                    <div className="h-8 w-px bg-border" />
+                    <div className="flex items-center gap-2">
+                      <Pill className="size-5 text-primary" />
+                      <span className="text-lg font-bold tabular-nums">{displayedSys.units}</span>
+                      <span className="text-xs text-muted-foreground">وحدة</span>
+                    </div>
                   </div>
                 </div>
-                <div className="flex items-center justify-around gap-3">
-                  <div className="flex items-center gap-2">
-                    <Package className="size-5 text-primary" />
-                    <span className="text-lg font-bold tabular-nums">{displayedSys.boxes}</span>
-                    <span className="text-xs text-muted-foreground">علبة</span>
-                  </div>
-                  <div className="h-8 w-px bg-border" />
-                  <div className="flex items-center gap-2">
-                    <Pill className="size-5 text-primary" />
-                    <span className="text-lg font-bold tabular-nums">{displayedSys.units}</span>
-                    <span className="text-xs text-muted-foreground">وحدة</span>
-                  </div>
-                </div>
-              </div>
+              )}
 
               {(liveLoading || live || liveError) && (
                 <div className="rounded-2xl border border-border bg-background p-3 space-y-2">
@@ -327,12 +377,30 @@ export function CountSheet({
                 </div>
               )}
 
+              {isAdmin && isApproved && (
+                <Button
+                  type="button"
+                  variant="destructive"
+                  className="w-full h-11 font-semibold"
+                  disabled={cancelMut.isPending}
+                  onClick={() => {
+                    const ok = confirm("سيتم إلغاء اعتماد هذا الصنف وحذف العد المعتمد الحالي. هل تريد المتابعة؟");
+                    if (ok) cancelMut.mutate();
+                  }}
+                >
+                  {cancelMut.isPending ? "جاري إلغاء الاعتماد..." : "إلغاء الاعتماد"}
+                </Button>
+              )}
+
               <div className="grid grid-cols-2 gap-3">
                 <BigQtyCard
                   icon={<Package className="size-5" />}
                   title="علبة"
                   value={boxes}
-                  onChange={setBoxes}
+                  onChange={(value) => {
+                    setBoxes(value);
+                    setCountStarted(true);
+                  }}
                   inputId="qty-boxes"
                   nextId="qty-units"
                   disabled={isApproved}
@@ -341,27 +409,36 @@ export function CountSheet({
                   icon={<Pill className="size-5" />}
                   title="وحدة"
                   value={units}
-                  onChange={setUnits}
+                  onChange={(value) => {
+                    setUnits(value);
+                    setCountStarted(true);
+                  }}
                   inputId="qty-units"
                   nextId="btn-confirm"
                   disabled={isApproved}
                 />
               </div>
 
-              <div
-                className={cn(
-                  "rounded-xl p-3 text-sm font-semibold text-center",
-                  status === "match" && "bg-success/15 text-success",
-                  status === "shortage" && "bg-destructive/15 text-destructive",
-                  status === "excess" && "bg-info/15 text-info",
-                )}
-              >
-                {status === "match"
-                  ? "✅ مطابق"
-                  : status === "shortage"
-                    ? `🔴 عجز: ${fmtDiffAbs(diff)}`
-                    : `🔵 زيادة: ${fmtDiffAbs(diff)}`}
-              </div>
+              {showClearedState ? (
+                <div className="rounded-xl p-3 text-sm font-semibold text-center bg-muted text-muted-foreground">
+                  لم يتم إدخال عد جديد
+                </div>
+              ) : (
+                <div
+                  className={cn(
+                    "rounded-xl p-3 text-sm font-semibold text-center",
+                    status === "match" && "bg-success/15 text-success",
+                    status === "shortage" && "bg-destructive/15 text-destructive",
+                    status === "excess" && "bg-info/15 text-info",
+                  )}
+                >
+                  {status === "match"
+                    ? "✅ مطابق"
+                    : status === "shortage"
+                      ? `🔴 عجز: ${fmtDiffAbs(diff)}`
+                      : `🔵 زيادة: ${fmtDiffAbs(diff)}`}
+                </div>
+              )}
 
               <div className="grid grid-cols-2 gap-2 sticky bottom-0 bg-background pt-2">
                 <Button

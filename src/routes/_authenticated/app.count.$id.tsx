@@ -9,6 +9,7 @@ import { CountSheet } from "@/components/employee/count-sheet";
 import { BarcodeScannerSheet } from "@/components/employee/barcode-scanner-sheet";
 import { formatQtyArabic, diffTriple, diffStatus } from "@/lib/quantity-parser";
 import { fetchAllSupabasePages } from "@/lib/supabase-pagination";
+import { useCurrentUser } from "@/hooks/use-current-user";
 import { Camera, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
@@ -51,6 +52,8 @@ function CountPage() {
   const [openItem, setOpenItem] = useState<Item | null>(null);
   const [query, setQuery] = useState("");
   const [scannerOpen, setScannerOpen] = useState(false);
+  const { data: currentUser } = useCurrentUser();
+  const isAdmin = currentUser?.role === "admin";
 
   const { data: items = [], isLoading, refetch } = useQuery({
     queryKey: ["assigned-items", id],
@@ -232,9 +235,13 @@ function CountPage() {
 
       <CountSheet
         item={openItem}
+        isAdmin={isAdmin}
         onClose={() => setOpenItem(null)}
         onSaved={() => {
           setOpenItem(null);
+          void refetch();
+        }}
+        onCancelled={() => {
           void refetch();
         }}
       />

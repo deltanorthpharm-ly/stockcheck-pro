@@ -1,7 +1,15 @@
 import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { z } from "zod";
-import { diffStatus, normalizePackSize, rawToQty, qtyToRaw } from "@/lib/quantity-parser";
+import { diffStatus, formatQtyArabic, normalizePackSize, rawToQty, qtyToRaw } from "@/lib/quantity-parser";
+
+async function requireAdmin(context: { supabase: any; userId: string }) {
+  const { data: isAdmin } = await context.supabase.rpc("has_role", {
+    _user_id: context.userId,
+    _role: "admin",
+  });
+  if (!isAdmin) throw new Error("Forbidden: admin only");
+}
 
 // Save (or approve) a physical count.
 // - When status='draft' we upsert the current draft version.
@@ -186,4 +194,129 @@ export const saveCount = createServerFn({ method: "POST" })
       .single();
     if (iErr) throw new Error(iErr.message);
     return { id: inserted.id, deduped: false };
+  });
+
+export const cancelApprovedCount = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input) =>
+    z
+      .object({
+        item_id: z.string().uuid(),
+        session_id: z.string().uuid(),
+        live_snapshot: z
+          .object({
+            raw_quantity: z.number().nullable().optional(),
+            pack_size: z.number().int().nullable().optional(),
+            system_boxes: z.number().int().nullable().optional(),
+            system_units: z.number().int().nullable().optional(),
+            formatted_quantity: z.string().nullable().optional(),
+            source_read_at: z.string().nullable().optional(),
+          })
+          .optional(),
+      })
+      .parse(input),
+  )
+  .handler(async ({ data, context }) => {
+    await requireAdmin(context);
+
+    const { data: current, error: currentErr } = await context.supabase
+      .from("inventory_counts")
+      .select(
+        "id, phys_boxes, phys_strips, phys_units, difference_raw, difference_boxes, difference_units, diff_status",
+      )
+      .eq("item_id", data.item_id)
+      .eq("session_id", data.session_id)
+      .eq("status", "approved")
+      .eq("is_current", true)
+      .maybeSingle();
+    if (currentErr) throw new Error(currentErr.message);
+    if (!current) throw new Error("لا يوجد عد معتمد لإلغائه.");
+
+    const { data: itemRow, error: itemErr } = await context.supabase
+      .from("inventory_items")
+      .select(
+        "id, session_id, pack_size, system_boxes, system_units, system_quantity_raw, raw_quantity_snapshot",
+      )
+      .eq("id", data.item_id)
+      .eq("session_id", data.session_id)
+      .maybeSingle();
+    if (itemErr) throw new Error(itemErr.message);
+    if (!itemRow) throw new Error("Inventory item not found");
+
+    const live = data.live_snapshot;
+    const nextPackSize =
+      normalizePackSize(live?.pack_size) ?? normalizePackSize(itemRow.pack_size);
+    const hasUsableLive =
+      live &&
+      live.system_boxes != null &&
+      live.system_units != null &&
+      nextPackSize != null;
+
+    if (hasUsableLive) {
+      const nextRaw =
+        live.raw_quantity ??
+        qtyToRaw(
+          { boxes: live.system_boxes ?? 0, units: live.system_units ?? 0 },
+          nextPackSize,
+        );
+      const nextFormatted =
+        live.formatted_quantity ??
+        formatQtyArabic({
+          boxes: live.system_boxes ?? 0,
+          strips: 0,
+          units: live.system_units ?? 0,
+        });
+
+      const { error: updateItemErr } = await context.supabase
+        .from("inventory_items")
+        .update({
+          system_boxes: live.system_boxes,
+          system_units: live.system_units,
+          system_quantity_raw: nextFormatted,
+          pack_size: nextPackSize,
+          raw_quantity_snapshot: nextRaw,
+          system_boxes_snapshot: live.system_boxes,
+          system_units_snapshot: live.system_units,
+          formatted_quantity_snapshot: nextFormatted,
+          conversion_status: nextRaw != null && nextRaw < 0 ? "negative_stock" : "ok",
+          source_read_at: live.source_read_at ?? new Date().toISOString(),
+        })
+        .eq("id", data.item_id)
+        .eq("session_id", data.session_id);
+      if (updateItemErr) throw new Error(updateItemErr.message);
+    }
+
+    const { error: retireErr } = await context.supabase
+      .from("inventory_counts")
+      .update({
+        is_current: false,
+        requires_recount: false,
+        recount_reason: null,
+      })
+      .eq("id", current.id);
+    if (retireErr) throw new Error(retireErr.message);
+
+    const { error: auditErr } = await (context.supabase as any)
+      .from("inventory_count_unapproval_audit")
+      .insert({
+        session_id: data.session_id,
+        inventory_item_id: data.item_id,
+        count_id: current.id,
+        old_phys_boxes: current.phys_boxes,
+        old_phys_units: current.phys_units,
+        old_difference_raw: current.difference_raw,
+        old_difference_boxes: current.difference_boxes,
+        old_difference_units: current.difference_units,
+        old_diff_status: current.diff_status,
+        old_system_boxes: itemRow.system_boxes,
+        old_system_units: itemRow.system_units,
+        old_raw_quantity_snapshot: itemRow.raw_quantity_snapshot,
+        new_system_boxes: hasUsableLive ? live?.system_boxes : null,
+        new_system_units: hasUsableLive ? live?.system_units : null,
+        new_raw_quantity_snapshot: hasUsableLive ? live?.raw_quantity ?? null : null,
+        cancelled_by: context.userId,
+      });
+    if (auditErr) throw new Error(auditErr.message);
+
+    return { ok: true, snapshotUpdated: Boolean(hasUsableLive) };
   });
