@@ -33,6 +33,21 @@ type Item = {
 
 type ApprovalGateState = "idle" | "checking" | "ready" | "blocked";
 
+export type SavedCountResult = {
+  id: string;
+  item_id?: string;
+  phys_boxes?: number;
+  phys_strips?: number;
+  phys_units?: number;
+  difference_raw?: number | string | null;
+  difference_boxes?: number | null;
+  difference_units?: number | null;
+  diff_status?: string | null;
+  counted_by?: string | null;
+  status?: "draft" | "approved";
+  deduped?: boolean;
+};
+
 const LIVE_UNAVAILABLE_MESSAGE = "لا يمكن اعتماد الصنف لأن الرصيد المباشر غير متاح.";
 
 function makeOpId() {
@@ -59,7 +74,7 @@ export function CountSheet({
   item: Item | null;
   isAdmin?: boolean;
   onClose: () => void;
-  onSaved: () => void;
+  onSaved: (saved?: SavedCountResult) => void;
   onCancelled?: () => void;
   onSnapshotRefreshed?: () => void | Promise<void>;
 }) {
@@ -281,7 +296,7 @@ export function CountSheet({
       }
       toast.success(kind === "approved" ? "تم اعتماد العدد" : "تم حفظ مسودة");
       setApprovalBlockMessage(null);
-      onSaved();
+      onSaved(res as SavedCountResult | undefined);
     },
     onError: (e: Error) => {
       toast.error(e.message);

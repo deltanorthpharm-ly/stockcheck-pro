@@ -293,7 +293,7 @@ export const saveCount = createServerFn({ method: "POST" })
 
     if (current && current.status === "draft" && data.status === "draft") {
       // Update the existing draft in place.
-      const { error: uErr } = await context.supabase
+      const { data: updated, error: uErr } = await context.supabase
         .from("inventory_counts")
         .update({
           phys_boxes: data.phys_boxes,
@@ -305,9 +305,11 @@ export const saveCount = createServerFn({ method: "POST" })
           ...submitCols,
           ...recountCols,
         })
-        .eq("id", current.id);
+        .eq("id", current.id)
+        .select("id, item_id, phys_boxes, phys_strips, phys_units, difference_raw, difference_boxes, difference_units, diff_status, counted_by, status")
+        .single();
       if (uErr) throw new Error(uErr.message);
-      return { id: current.id, deduped: false };
+      return { ...updated, deduped: false };
     }
 
     // Retire previous current version (keeps history).
@@ -337,10 +339,10 @@ export const saveCount = createServerFn({ method: "POST" })
         ...submitCols,
         ...recountCols,
       })
-      .select("id")
+      .select("id, item_id, phys_boxes, phys_strips, phys_units, difference_raw, difference_boxes, difference_units, diff_status, counted_by, status")
       .single();
     if (iErr) throw new Error(iErr.message);
-    return { id: inserted.id, deduped: false };
+    return { ...inserted, deduped: false };
   });
 
 export const refreshUncountedItemSnapshotOnOpen = createServerFn({ method: "POST" })

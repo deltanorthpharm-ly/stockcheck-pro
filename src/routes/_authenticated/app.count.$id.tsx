@@ -5,15 +5,16 @@ import { supabase } from "@/integrations/supabase/client";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { CountSheet } from "@/components/employee/count-sheet";
+import { CountSheet, type SavedCountResult } from "@/components/employee/count-sheet";
 import { BarcodeScannerSheet } from "@/components/employee/barcode-scanner-sheet";
-import { formatQtyArabic, diffTriple, diffStatus } from "@/lib/quantity-parser";
+import { formatQtyArabic } from "@/lib/quantity-parser";
 import { formatInventoryDiffBadge, normalizeInventoryDiffStatus } from "@/lib/inventory-diff-display";
 import { fetchAllSupabasePages } from "@/lib/supabase-pagination";
 import { useCurrentUser } from "@/hooks/use-current-user";
 import { Camera, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
+import { useQueryClient } from "@tanstack/react-query";
 
 export const Route = createFileRoute("/_authenticated/app/count/$id")({
   component: CountPage,
@@ -66,10 +67,26 @@ type ProfileRow = {
   username: string | null;
 };
 
+type CountStatusFilter = "uncounted" | "shortage" | "excess" | "match" | "all";
+
+const COUNT_STATUS_CARDS: Array<{
+  key: CountStatusFilter;
+  label: string;
+  tone: "muted" | "destructive" | "info" | "success" | "primary";
+}> = [
+  { key: "uncounted", label: "لم يُعدّ", tone: "muted" },
+  { key: "shortage", label: "عجز", tone: "destructive" },
+  { key: "excess", label: "زيادة", tone: "info" },
+  { key: "match", label: "مطابق", tone: "success" },
+  { key: "all", label: "الكل", tone: "primary" },
+];
+
 function CountPage() {
   const { id } = Route.useParams();
+  const queryClient = useQueryClient();
   const [openItem, setOpenItem] = useState<Item | null>(null);
   const [query, setQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<CountStatusFilter>("uncounted");
   const [scannerOpen, setScannerOpen] = useState(false);
   const { data: currentUser } = useCurrentUser();
   const isAdmin = currentUser?.role === "admin";
@@ -138,7 +155,7 @@ function CountPage() {
     [items],
   );
 
-  const filtered = useMemo(() => {
+  const searchFilteredItems = useMemo(() => {
     if (!query.trim()) return visibleItems;
     const q = query.trim().toLowerCase();
     return visibleItems.filter(
@@ -149,8 +166,60 @@ function CountPage() {
     );
   }, [visibleItems, query]);
 
-  const total = visibleItems.length;
-  const counted = visibleItems.filter((i) => i.current?.status === "approved").length;
+  const statusCounts = useMemo(
+    () =>
+      searchFilteredItems.reduce(
+        (acc, item) => {
+          const status = getCountStatus(item);
+          acc[status] += 1;
+          acc.all += 1;
+          return acc;
+        },
+        { uncounted: 0, shortage: 0, excess: 0, match: 0, all: 0 } as Record<CountStatusFilter, number>,
+      ),
+    [searchFilteredItems],
+  );
+
+  const filtered = useMemo(() => {
+    if (statusFilter === "all") return searchFilteredItems;
+    return searchFilteredItems.filter((item) => getCountStatus(item) === statusFilter);
+  }, [searchFilteredItems, statusFilter]);
+
+  const progressTotal = statusCounts.all;
+  const progressCompleted = statusCounts.match + statusCounts.shortage + statusCounts.excess;
+  const progressPercent = progressTotal ? Math.round((progressCompleted / progressTotal) * 100) : 0;
+
+  const updateCachedItemCount = useCallback(
+    (itemId: string, current: Item["current"] | undefined) => {
+      queryClient.setQueryData<Item[]>(["assigned-items", id], (previous) =>
+        previous?.map((item) => (item.id === itemId ? { ...item, current } : item)) ?? previous,
+      );
+    },
+    [id, queryClient],
+  );
+
+  const applySavedCountOptimistically = useCallback(
+    (saved?: SavedCountResult) => {
+      if (!saved?.item_id || !saved.status) return;
+
+      const current: Item["current"] = {
+        phys_boxes: saved.phys_boxes ?? 0,
+        phys_strips: saved.phys_strips ?? 0,
+        phys_units: saved.phys_units ?? 0,
+        difference_raw: saved.difference_raw ?? null,
+        difference_boxes: saved.difference_boxes ?? null,
+        difference_units: saved.difference_units ?? null,
+        diff_status: saved.diff_status ?? null,
+        counted_by: saved.counted_by ?? currentUser?.id ?? null,
+        counted_employee_name:
+          currentUser?.display_name || currentUser?.username || "مستخدم غير معروف",
+        status: saved.status,
+      };
+
+      updateCachedItemCount(saved.item_id, current);
+    },
+    [currentUser?.display_name, currentUser?.id, currentUser?.username, updateCachedItemCount],
+  );
 
   const handleBarcodeDetected = useCallback((barcode: string) => {
     const code = barcode.trim();
@@ -209,11 +278,49 @@ function CountPage() {
               onChange={(e) => setQuery(e.target.value)}
             />
           </div>
-          <div className="flex items-center justify-between text-xs text-muted-foreground">
-            <span>
-              تم عدّ {counted.toLocaleString("ar")} من {total.toLocaleString("ar")}
-            </span>
-            <span>{total ? Math.round((counted / total) * 100) : 0}%</span>
+          <div className="-mx-1 overflow-x-auto pb-1">
+            <div className="flex min-w-max gap-2 px-1">
+              {COUNT_STATUS_CARDS.map((card) => (
+                <button
+                  key={card.key}
+                  type="button"
+                  onClick={() => setStatusFilter(card.key)}
+                  className={cn(
+                    "min-w-[76px] rounded-xl border px-3 py-2 text-start transition-colors",
+                    statusFilter === card.key
+                      ? statusCardActiveClass(card.tone)
+                      : "border-border bg-card text-foreground active:bg-accent",
+                  )}
+                  aria-pressed={statusFilter === card.key}
+                >
+                  <div
+                    className={cn(
+                      "text-[11px] font-semibold leading-none",
+                      statusFilter === card.key ? "text-current opacity-80" : "text-muted-foreground",
+                    )}
+                  >
+                    {card.label}
+                  </div>
+                  <div className="mt-1 text-lg font-extrabold tabular-nums">
+                    {statusCounts[card.key].toLocaleString("ar")}
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between text-xs text-muted-foreground">
+              <span>
+                تم عدّ {progressCompleted.toLocaleString("ar")} من {progressTotal.toLocaleString("ar")} صنفًا
+              </span>
+              <span className="font-semibold text-foreground">{progressPercent.toLocaleString("ar")}%</span>
+            </div>
+            <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+              <div
+                className="h-full rounded-full bg-primary transition-all"
+                style={{ width: `${progressPercent}%` }}
+              />
+            </div>
           </div>
         </div>
       </div>
@@ -228,11 +335,7 @@ function CountPage() {
         ) : (
           filtered.map((it) => {
             const sys = { boxes: it.system_boxes, strips: it.system_strips, units: it.system_units };
-            const phys = it.current
-              ? { boxes: it.current.phys_boxes, strips: it.current.phys_strips, units: it.current.phys_units }
-              : null;
-            const calculatedStatus = phys ? diffStatus(diffTriple(sys, phys, it.pack_size ?? 1)) : null;
-            const status = normalizeInventoryDiffStatus(it.current?.diff_status) ?? calculatedStatus;
+            const status = getCountStatus(it);
             const diffBadge = it.current
               ? formatInventoryDiffBadge(
                   {
@@ -305,11 +408,15 @@ function CountPage() {
         item={openItem}
         isAdmin={isAdmin}
         onClose={() => setOpenItem(null)}
-        onSaved={() => {
+        onSaved={(saved) => {
+          applySavedCountOptimistically(saved);
           setOpenItem(null);
           void refetch();
         }}
         onCancelled={() => {
+          if (openItem?.id) {
+            updateCachedItemCount(openItem.id, undefined);
+          }
           void refetch();
         }}
         onSnapshotRefreshed={handleSnapshotRefreshed}
@@ -321,4 +428,43 @@ function CountPage() {
       />
     </div>
   );
+}
+
+function getCountStatus(item: Item): Exclude<CountStatusFilter, "all"> {
+  if (item.current?.status !== "approved") return "uncounted";
+
+  const savedStatus = normalizeInventoryDiffStatus(item.current.diff_status);
+  if (savedStatus === "match" || savedStatus === "shortage" || savedStatus === "excess") {
+    return savedStatus;
+  }
+
+  const raw = Number(item.current.difference_raw);
+  if (Number.isFinite(raw)) {
+    if (raw < 0) return "shortage";
+    if (raw > 0) return "excess";
+    return "match";
+  }
+
+  const boxes = Number(item.current.difference_boxes ?? 0);
+  const units = Number(item.current.difference_units ?? 0);
+  const combined = boxes + units;
+  if (combined < 0) return "shortage";
+  if (combined > 0) return "excess";
+  return "match";
+}
+
+function statusCardActiveClass(tone: (typeof COUNT_STATUS_CARDS)[number]["tone"]) {
+  switch (tone) {
+    case "destructive":
+      return "border-destructive/50 bg-destructive/15 text-destructive shadow-sm";
+    case "info":
+      return "border-info/50 bg-info/15 text-info shadow-sm";
+    case "success":
+      return "border-success/50 bg-success/15 text-success shadow-sm";
+    case "primary":
+      return "border-primary/50 bg-primary/15 text-primary shadow-sm";
+    case "muted":
+    default:
+      return "border-foreground/20 bg-muted text-foreground shadow-sm";
+  }
 }
