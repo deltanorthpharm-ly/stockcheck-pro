@@ -650,6 +650,7 @@ function RowList({
           : null;
         const diff = count ? getDisplayDiff(row, count) : null;
         const approval = getApprovalInfo(row);
+        logInventoryReportDiagnostics(row, count, diff);
 
         return (
           <Card key={row.id} className="space-y-2 p-3">
@@ -839,17 +840,31 @@ function getCalculatedDiff(row: Row, count: CountRow) {
 }
 
 function getDisplayDiff(row: Row, count: CountRow): SavedDiff {
+  const calculated = getCalculatedDiff(row, count);
   const savedStatus = normalizeInventoryDiffStatus(count.diff_status);
-  if (savedStatus) {
-    return {
-      diff_status: savedStatus,
-      difference_raw: count.difference_raw,
-      difference_boxes: count.difference_boxes,
-      difference_units: count.difference_units,
-    };
+  const savedRaw = Number(count.difference_raw);
+
+  if (savedStatus && Number.isFinite(savedRaw) && savedRaw !== calculated.raw) {
+    console.warn(
+      "[inventory-report] saved difference mismatch; using displayed snapshot/count values",
+      {
+        itemId: row.external_item_id,
+        itemName: row.item_name_raw,
+        packSize: row.pack_size,
+        systemBoxes: row.system_boxes,
+        systemUnits: row.system_units,
+        countedBoxes: count.phys_boxes,
+        countedUnits: count.phys_units,
+        savedDifferenceRaw: savedRaw,
+        calculatedDifferenceRaw: calculated.raw,
+        savedDifferenceBoxes: count.difference_boxes,
+        savedDifferenceUnits: count.difference_units,
+        calculatedDifferenceBoxes: calculated.boxes,
+        calculatedDifferenceUnits: calculated.units,
+      },
+    );
   }
 
-  const calculated = getCalculatedDiff(row, count);
   return {
     diff_status: diffStatus(calculated),
     difference_raw: calculated.raw,
@@ -859,7 +874,7 @@ function getDisplayDiff(row: Row, count: CountRow): SavedDiff {
 }
 
 function getDisplayStatus(row: Row, count: CountRow) {
-  return normalizeInventoryDiffStatus(count.diff_status) ?? diffStatus(getCalculatedDiff(row, count));
+  return diffStatus(getCalculatedDiff(row, count));
 }
 
 function getRawDiff(row: Row) {
@@ -882,9 +897,12 @@ function getRawDiff(row: Row) {
   return null;
 }
 
-function getUnitCost(_row: Row) {
-  const value = Number(_row.last_purchase_price);
-  return Number.isFinite(value) && value > 0 ? value : null;
+function getUnitPurchasePrice(row: Row) {
+  const packPrice = Number(row.last_purchase_price);
+  const packSize = Number(row.pack_size);
+  if (!Number.isFinite(packPrice) || packPrice <= 0) return null;
+  if (!Number.isFinite(packSize) || packSize <= 0) return null;
+  return packPrice / packSize;
 }
 
 function getDifferenceFinancialValue(row: Row) {
@@ -892,10 +910,51 @@ function getDifferenceFinancialValue(row: Row) {
   if (rawDiff == null) return null;
   if (rawDiff === 0) return 0;
 
-  const unitCost = getUnitCost(row);
-  if (unitCost == null) return null;
+  const unitPurchasePrice = getUnitPurchasePrice(row);
+  if (unitPurchasePrice == null) return null;
 
-  return Math.abs(rawDiff) * unitCost;
+  return Math.abs(rawDiff) * unitPurchasePrice;
+}
+
+function getFinancialValueUsingPackPriceAsRawUnit(row: Row) {
+  const rawDiff = getRawDiff(row);
+  const packPrice = Number(row.last_purchase_price);
+  if (rawDiff == null || !Number.isFinite(packPrice) || packPrice <= 0) return null;
+  return Math.abs(rawDiff) * packPrice;
+}
+
+function logInventoryReportDiagnostics(row: Row, count: CountRow | null, diff: SavedDiff | null) {
+  if (!/قفازات|قفاز|glove/i.test(row.item_name_raw)) return;
+
+  const packSize = Number(row.pack_size);
+  const systemQuantityRaw = Number.isFinite(packSize)
+    ? (Number(row.system_boxes || 0) * packSize) + Number(row.system_units || 0)
+    : null;
+  const countedQuantityRaw = count && Number.isFinite(packSize)
+    ? (Number(count.phys_boxes || 0) * packSize) + Number(count.phys_units || 0)
+    : null;
+  const displayDiffRaw = diff?.difference_raw == null ? null : Number(diff.difference_raw);
+
+  console.log(
+    "[inventory-report] item financial/diff diagnostic:",
+    JSON.stringify({
+      itemId: row.external_item_id,
+      itemName: row.item_name_raw,
+      pack_size: row.pack_size,
+      last_purchase_price: row.last_purchase_price,
+      system_boxes: row.system_boxes,
+      system_units: row.system_units,
+      counted_boxes: count?.phys_boxes ?? null,
+      counted_units: count?.phys_units ?? null,
+      system_quantity_raw: systemQuantityRaw,
+      counted_quantity_raw: countedQuantityRaw,
+      difference_raw: displayDiffRaw,
+      difference_boxes: diff?.difference_boxes ?? null,
+      difference_units: diff?.difference_units ?? null,
+      financial_value_before_fix: getFinancialValueUsingPackPriceAsRawUnit(row),
+      financial_value_after_fix: getDifferenceFinancialValue(row),
+    }),
+  );
 }
 
 function formatFinancialDifference(row: Row) {
@@ -909,7 +968,7 @@ function summarizeFinancial(rows: Row[]) {
   let hasAnyPurchasePrice = false;
 
   for (const row of rows) {
-    if (getUnitCost(row) != null) hasAnyPurchasePrice = true;
+    if (getUnitPurchasePrice(row) != null) hasAnyPurchasePrice = true;
 
     const count = getApprovedCount(row);
     if (!count) continue;

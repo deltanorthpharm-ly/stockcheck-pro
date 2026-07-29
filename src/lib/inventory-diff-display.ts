@@ -29,16 +29,17 @@ export function formatInventoryDiffBadge(
   const label = status === "shortage" ? "عجز" : status === "excess" ? "زيادة" : null;
   if (!label) return "غير محدد";
 
-  let boxes = Number(diff.difference_boxes ?? 0);
-  let units = Number(diff.difference_units ?? 0);
+  let boxes = 0;
+  let units = 0;
+  const raw = Number(diff.difference_raw);
 
-  if (!boxes && !units && diff.difference_raw != null) {
-    const raw = Number(diff.difference_raw);
-    if (Number.isFinite(raw) && raw !== 0) {
-      const qty = rawToQty(raw, packSize ?? 1);
-      boxes = qty.boxes;
-      units = qty.units;
-    }
+  if (Number.isFinite(raw) && raw !== 0) {
+    const qty = rawToQty(raw, packSize ?? 1);
+    boxes = qty.boxes;
+    units = qty.units;
+  } else {
+    boxes = Number(diff.difference_boxes ?? 0);
+    units = Number(diff.difference_units ?? 0);
   }
 
   const parts = [

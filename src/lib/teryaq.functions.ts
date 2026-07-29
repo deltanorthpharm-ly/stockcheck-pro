@@ -187,6 +187,36 @@ function getPostgresErrorBody(error: {
   };
 }
 
+function formatSupabaseError(error: {
+  code?: string;
+  message?: string;
+  details?: string;
+  hint?: string;
+}) {
+  const body = getPostgresErrorBody(error);
+  return [
+    `code=${body.code ?? "?"}`,
+    `message=${body.message ?? "unavailable"}`,
+    body.details ? `details=${body.details}` : null,
+    body.hint ? `hint=${body.hint}` : null,
+  ].filter(Boolean).join(" | ");
+}
+
+async function assertInventoryItemsSchema(context: { supabase: any }) {
+  const { error } = await context.supabase
+    .from("inventory_items")
+    .select("last_purchase_price")
+    .limit(1);
+
+  if (!error) return;
+
+  const formatted = formatSupabaseError(error);
+  console.error("[teryaq-sync] inventory_items schema check failed:", formatted);
+  throw new Error(
+    `Page 1: inventory_items schema check failed: ${formatted}. Apply migration 20260729130000_add_last_purchase_price_to_inventory_items.sql to the connected Supabase project and reload the PostgREST schema cache if needed.`,
+  );
+}
+
 function findOffendingInventoryValue(
   rows: InventoryRow[],
   error: { message?: string; details?: string; hint?: string },
@@ -308,6 +338,8 @@ export const syncSessionFromTeryaq = createServerFn({ method: "POST" })
     let errorMsg: string | null = null;
 
     try {
+      await assertInventoryItemsSchema(context);
+
       for (let page = 1, hasNextPage = true; hasNextPage; page += 1) {
         currentPage = page;
         const r = await callProxy(jwt, "/items", {
@@ -334,6 +366,18 @@ export const syncSessionFromTeryaq = createServerFn({ method: "POST" })
 
         const normalized = normalizeItemsPayload(r.body);
         const items = normalized.items;
+        if (page === 1) {
+          console.log(
+            "[teryaq-sync] first 10 items from Teryaq:",
+            JSON.stringify(
+              items.slice(0, 10).map((item) => ({
+                itemId: item["itemId"],
+                name: item["itemName"],
+                lastPurchasePrice: item["lastPurchasePrice"] ?? null,
+              })),
+            ),
+          );
+        }
         if (page === 1) {
           totalAvailableFromTeryaq = normalized.totalItems ?? items.length;
           if (totalAvailableFromTeryaq === 0) {
@@ -378,21 +422,47 @@ export const syncSessionFromTeryaq = createServerFn({ method: "POST" })
         }
 
         if (rows.length > 0) {
+          if (page === 1) {
+            const firstPayload = rows[0];
+            console.log(
+              "[teryaq-sync] first inventory_items upsert payload:",
+              JSON.stringify({
+                external_item_id: firstPayload.external_item_id,
+                item_name_raw: firstPayload.item_name_raw,
+                last_purchase_price: firstPayload.last_purchase_price ?? null,
+              }),
+            );
+          }
           const { error: upErr } = await context.supabase
             .from("inventory_items")
             .upsert(rows, { onConflict: "session_id,external_item_id" });
           if (upErr) {
             const postgresError = getPostgresErrorBody(upErr);
             const offendingValue = findOffendingInventoryValue(rows, upErr);
+            const fallbackWithoutLastPurchasePrice = await context.supabase
+              .from("inventory_items")
+              .upsert(
+                rows.slice(0, 1).map(({ last_purchase_price: _ignored, ...row }) => row),
+                { onConflict: "session_id,external_item_id" },
+              );
             console.error(
               "[teryaq-sync] page upsert failed:",
               JSON.stringify({
                 page,
                 postgresError,
                 offendingValue,
+                diagnosticFallbackWithoutLastPurchasePrice: {
+                  ok: !fallbackWithoutLastPurchasePrice.error,
+                  error: fallbackWithoutLastPurchasePrice.error
+                    ? getPostgresErrorBody(fallbackWithoutLastPurchasePrice.error)
+                    : null,
+                },
               }),
             );
-            throw new Error(`Page ${page}: failed to save inventory batch (${upErr.code ?? "?"})`);
+            const fallbackMessage = fallbackWithoutLastPurchasePrice.error
+              ? "diagnostic_without_last_purchase_price=failed"
+              : "diagnostic_without_last_purchase_price=succeeded";
+            throw new Error(`Page ${page}: failed to save inventory batch: ${formatSupabaseError(upErr)} | ${fallbackMessage}`);
           }
 
           const externalIds = rows.map((r) => r.external_item_id);
@@ -407,6 +477,29 @@ export const syncSessionFromTeryaq = createServerFn({ method: "POST" })
           }
           if ((count ?? 0) !== rows.length) {
             throw new Error(`Page ${page}: saved row count mismatch (${count ?? 0}/${rows.length})`);
+          }
+          if (page === 1) {
+            const { data: savedSample, error: sampleErr } = await context.supabase
+              .from("inventory_items")
+              .select("id,item_name_raw,last_purchase_price")
+              .eq("session_id", data.session_id)
+              .eq("external_item_id", rows[0].external_item_id)
+              .maybeSingle();
+            if (sampleErr) {
+              console.error(
+                "[teryaq-sync] failed to read saved last_purchase_price sample:",
+                formatSupabaseError(sampleErr),
+              );
+            } else {
+              console.log(
+                "[teryaq-sync] saved inventory_items sample:",
+                JSON.stringify({
+                  id: savedSample?.id,
+                  name: savedSample?.item_name_raw,
+                  last_purchase_price: savedSample?.last_purchase_price ?? null,
+                }),
+              );
+            }
           }
           savedRows += count ?? 0;
         }
