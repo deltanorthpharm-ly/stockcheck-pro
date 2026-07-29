@@ -115,6 +115,38 @@ async function refreshSnapshotFromLiveCache(
   return Array.isArray(rpcRows) ? rpcRows[0] : rpcRows;
 }
 
+async function refreshSnapshotFromLiveValues(
+  context: { supabase: any },
+  data: {
+    item_id: string;
+    session_id: string;
+    system_boxes: number;
+    system_units: number;
+    system_quantity_raw: string;
+    pack_size: number;
+    raw_quantity_snapshot: number;
+    source_read_at: string | null | undefined;
+    reason: string;
+    allow_current_draft: boolean;
+  },
+) {
+  const { data: rpcRows, error: rpcErr } = await (context.supabase as any)
+    .rpc("refresh_inventory_item_snapshot_from_values", {
+      _inventory_item_id: data.item_id,
+      _session_id: data.session_id,
+      _system_boxes: data.system_boxes,
+      _system_units: data.system_units,
+      _system_quantity_raw: data.system_quantity_raw,
+      _pack_size: data.pack_size,
+      _raw_quantity_snapshot: data.raw_quantity_snapshot,
+      _source_read_at: data.source_read_at ?? null,
+      _refresh_reason: data.reason,
+      _allow_current_draft: data.allow_current_draft,
+    });
+  if (rpcErr) throw new Error(rpcErr.message);
+  return Array.isArray(rpcRows) ? rpcRows[0] : rpcRows;
+}
+
 // Save (or approve) a physical count.
 // - When status='draft' we upsert the current draft version.
 // - When status='approved' we mark previous current row as history and insert a new version.
@@ -391,9 +423,15 @@ export const refreshUncountedItemSnapshotOnOpen = createServerFn({ method: "POST
     const reason = data.reason ?? "auto_refresh_on_first_open";
     const allowCurrentDraft =
       reason === "approval_guard_live_mismatch" ? true : Boolean(data.allow_current_draft);
-    const result = await refreshSnapshotFromLiveCache(context, {
+    const result = await refreshSnapshotFromLiveValues(context, {
       item_id: data.item_id,
       session_id: data.session_id,
+      system_boxes: live.system_boxes,
+      system_units: live.system_units,
+      system_quantity_raw: nextFormatted,
+      pack_size: nextPackSize,
+      raw_quantity_snapshot: nextRaw,
+      source_read_at: live.source_read_at,
       reason,
       allow_current_draft: allowCurrentDraft,
     });
