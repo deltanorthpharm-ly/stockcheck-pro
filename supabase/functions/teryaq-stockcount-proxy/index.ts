@@ -366,6 +366,7 @@ async function getSharedLiveStock(
   auth: { userId: string; role: Role },
   inventoryItemId: string,
   externalItemId: string,
+  forceRefresh = false,
 ): Promise<Response> {
   if (!UUID_RE.test(inventoryItemId)) return json({ error: "invalid inventory item id" }, 400);
   const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
@@ -387,7 +388,7 @@ async function getSharedLiveStock(
   if (cacheError) return json({ error: cacheError }, 500);
 
   const cached = snapshotFromCache(cacheRow, "cached");
-  if (cached && (Date.now() - Date.parse(cached.lastLiveRefreshAt)) < LIVE_CACHE_TTL_MS) {
+  if (!forceRefresh && cached && (Date.now() - Date.parse(cached.lastLiveRefreshAt)) < LIVE_CACHE_TTL_MS) {
     return json({ success: true, data: cached });
   }
 
@@ -431,11 +432,12 @@ Deno.serve(async (req) => {
     const externalItemId = detailMatch[1];
     const isStock = Boolean(detailMatch[2]);
     const inventoryItemId = url.searchParams.get("inventoryItemId");
+    const forceRefresh = url.searchParams.get("forceRefresh") === "1";
     if (!ITEM_ID_RE.test(externalItemId)) {
       return json({ error: "invalid item id" }, 400);
     }
     if (isStock && inventoryItemId) {
-      return await getSharedLiveStock(auth, inventoryItemId, externalItemId);
+      return await getSharedLiveStock(auth, inventoryItemId, externalItemId, forceRefresh);
     }
     if (auth.role === "employee") {
       const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {

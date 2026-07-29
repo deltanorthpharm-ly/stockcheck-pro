@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { Card } from "@/components/ui/card";
@@ -31,6 +31,7 @@ type Item = {
   system_strips: number;
   system_units: number;
   system_quantity_raw: string | null;
+  raw_quantity_snapshot: number | string | null;
   quantity_parse_status: string;
   current?: {
     phys_boxes: number;
@@ -80,7 +81,7 @@ function CountPage() {
         supabase
           .from("inventory_items")
           .select(
-            "id, session_id, row_index, item_name_raw, barcode, external_item_id, pack_size, system_boxes, system_strips, system_units, system_quantity_raw, quantity_parse_status",
+            "id, session_id, row_index, item_name_raw, barcode, external_item_id, pack_size, system_boxes, system_strips, system_units, system_quantity_raw, raw_quantity_snapshot, quantity_parse_status",
           )
           .eq("session_id", id)
           .order("row_index", { ascending: true })
@@ -176,6 +177,12 @@ function CountPage() {
   const handleSnapshotRefreshed = useCallback(() => {
     void refetch();
   }, [refetch]);
+
+  useEffect(() => {
+    if (!openItem?.id) return;
+    const updated = items.find((item) => item.id === openItem.id);
+    if (updated && updated !== openItem) setOpenItem(updated);
+  }, [items, openItem?.id]);
 
   return (
     <div className="flex flex-col">

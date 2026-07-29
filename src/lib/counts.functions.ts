@@ -20,6 +20,101 @@ const liveSnapshotInput = z.object({
   source_read_at: z.string().nullable().optional(),
 });
 
+const FUNCTIONS_BASE = `${process.env.SUPABASE_URL ?? ""}/functions/v1/teryaq-stockcount-proxy`;
+const LIVE_STOCK_CHANGED_MESSAGE =
+  "تغيّر رصيد الصنف في المنظومة أثناء العد.\nتم تحديث رصيد الجلسة، يرجى مراجعة الكمية ثم الاعتماد من جديد.";
+const LIVE_STOCK_UNAVAILABLE_MESSAGE = "تعذر التحقق من الرصيد المباشر، حاول مرة أخرى.";
+
+type ServerLiveStock = {
+  systemBoxes: number;
+  systemUnits: number;
+  rawQuantity: number | null;
+  formattedQuantity: string | null;
+  packSize: number | null;
+  readAt: string | null;
+};
+
+function getBearer(): string {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { getRequestHeader } = require("@tanstack/react-start/server") as {
+    getRequestHeader: (n: string) => string | undefined;
+  };
+  const h = getRequestHeader("authorization") ?? "";
+  return h.replace(/^Bearer\s+/i, "");
+}
+
+function finiteNumber(value: unknown): number | null {
+  if (value == null) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+async function fetchFreshLiveStockForApproval(
+  externalItemId: string,
+  inventoryItemId: string,
+): Promise<ServerLiveStock> {
+  const jwt = getBearer();
+  if (!FUNCTIONS_BASE || !jwt) throw new Error(LIVE_STOCK_UNAVAILABLE_MESSAGE);
+
+  const url = new URL(`${FUNCTIONS_BASE}/items/${encodeURIComponent(externalItemId)}/stock`);
+  url.searchParams.set("inventoryItemId", inventoryItemId);
+  url.searchParams.set("forceRefresh", "1");
+
+  const res = await fetch(url.toString(), {
+    headers: { Authorization: `Bearer ${jwt}`, Accept: "application/json" },
+  });
+  const text = await res.text();
+  let body: unknown = null;
+  try {
+    body = text ? JSON.parse(text) : null;
+  } catch {
+    body = text;
+  }
+
+  if (!res.ok || typeof body === "string") {
+    throw new Error(LIVE_STOCK_UNAVAILABLE_MESSAGE);
+  }
+
+  const root = (body ?? {}) as Record<string, unknown>;
+  const src = (root.data && typeof root.data === "object" ? root.data : root) as Record<string, unknown>;
+  const rawQuantity = finiteNumber(src.rawQuantity);
+  const packSize = finiteNumber(src.packSize);
+  const systemBoxes = finiteNumber(src.systemBoxes);
+  const systemUnits = finiteNumber(src.systemUnits);
+  if (rawQuantity == null || systemBoxes == null || systemUnits == null) {
+    throw new Error(LIVE_STOCK_UNAVAILABLE_MESSAGE);
+  }
+
+  return {
+    systemBoxes: Math.trunc(systemBoxes),
+    systemUnits: Math.trunc(systemUnits),
+    rawQuantity,
+    formattedQuantity: (src.formattedQuantity as string | null) ?? null,
+    packSize: packSize == null ? null : Math.trunc(packSize),
+    readAt: (src.readAt as string | null) ?? null,
+  };
+}
+
+async function refreshSnapshotFromLiveCache(
+  context: { supabase: any },
+  data: {
+    item_id: string;
+    session_id: string;
+    reason: string;
+    allow_current_draft: boolean;
+  },
+) {
+  const { data: rpcRows, error: rpcErr } = await (context.supabase as any)
+    .rpc("refresh_inventory_item_snapshot_from_live", {
+      _inventory_item_id: data.item_id,
+      _session_id: data.session_id,
+      _refresh_reason: data.reason,
+      _allow_current_draft: data.allow_current_draft,
+    });
+  if (rpcErr) throw new Error(rpcErr.message);
+  return Array.isArray(rpcRows) ? rpcRows[0] : rpcRows;
+}
+
 // Save (or approve) a physical count.
 // - When status='draft' we upsert the current draft version.
 // - When status='approved' we mark previous current row as history and insert a new version.
@@ -90,7 +185,7 @@ export const saveCount = createServerFn({ method: "POST" })
 
     const { data: itemRow, error: itemErr } = await context.supabase
       .from("inventory_items")
-      .select("system_boxes, system_units, pack_size")
+      .select("system_boxes, system_units, system_quantity_raw, pack_size, raw_quantity_snapshot, external_item_id")
       .eq("id", data.item_id)
       .eq("session_id", data.session_id)
       .maybeSingle();
@@ -102,6 +197,46 @@ export const saveCount = createServerFn({ method: "POST" })
     const packSize = normalizePackSize(itemRow.pack_size);
     const systemBoxes = itemRow.system_boxes;
     const systemUnits = itemRow.system_units;
+    let verifiedSubmitSnapshot = data.submit_snapshot;
+
+    if (data.status === "approved" && current?.status !== "approved") {
+      if (!itemRow.external_item_id) {
+        throw new Error(LIVE_STOCK_UNAVAILABLE_MESSAGE);
+      }
+
+      const latestLive = await fetchFreshLiveStockForApproval(itemRow.external_item_id, data.item_id);
+      const snapshotRaw =
+        finiteNumber(itemRow.raw_quantity_snapshot) ??
+        qtyToRaw({ boxes: systemBoxes, units: systemUnits }, packSize);
+      const liveRaw = finiteNumber(latestLive.rawQuantity);
+
+      if (snapshotRaw == null || liveRaw == null) {
+        throw new Error(LIVE_STOCK_UNAVAILABLE_MESSAGE);
+      }
+
+      verifiedSubmitSnapshot = {
+        raw_quantity: latestLive.rawQuantity,
+        pack_size: latestLive.packSize,
+        system_boxes: latestLive.systemBoxes,
+        system_units: latestLive.systemUnits,
+        source_read_at: latestLive.readAt,
+        submitted_at: new Date().toISOString(),
+      };
+
+      if (liveRaw !== snapshotRaw) {
+        const result = await refreshSnapshotFromLiveCache(context, {
+          item_id: data.item_id,
+          session_id: data.session_id,
+          reason: "approval_guard_live_mismatch",
+          allow_current_draft: current?.status === "draft",
+        });
+        if (!result?.updated && result?.reason === "missing_live_stock") {
+          throw new Error(LIVE_STOCK_UNAVAILABLE_MESSAGE);
+        }
+        throw new Error(LIVE_STOCK_CHANGED_MESSAGE);
+      }
+    }
+
     const physicalRaw = qtyToRaw({ boxes: data.phys_boxes, units: data.phys_units }, packSize);
     const systemRaw = qtyToRaw({ boxes: systemBoxes, units: systemUnits }, packSize);
     const differenceRaw =
@@ -135,14 +270,14 @@ export const saveCount = createServerFn({ method: "POST" })
           opened_at: data.open_snapshot.opened_at ?? null,
         }
       : {};
-    const submitCols = data.submit_snapshot
+    const submitCols = verifiedSubmitSnapshot
       ? {
-          raw_quantity_at_submit: data.submit_snapshot.raw_quantity ?? null,
-          pack_size_at_submit: data.submit_snapshot.pack_size ?? null,
-          system_boxes_at_submit: data.submit_snapshot.system_boxes ?? null,
-          system_units_at_submit: data.submit_snapshot.system_units ?? null,
-          source_read_at_submit: data.submit_snapshot.source_read_at ?? null,
-          submitted_at: data.submit_snapshot.submitted_at ?? null,
+          raw_quantity_at_submit: verifiedSubmitSnapshot.raw_quantity ?? null,
+          pack_size_at_submit: verifiedSubmitSnapshot.pack_size ?? null,
+          system_boxes_at_submit: verifiedSubmitSnapshot.system_boxes ?? null,
+          system_units_at_submit: verifiedSubmitSnapshot.system_units ?? null,
+          source_read_at_submit: verifiedSubmitSnapshot.source_read_at ?? null,
+          submitted_at: verifiedSubmitSnapshot.submitted_at ?? null,
         }
       : {};
     const recountCols =
@@ -213,6 +348,8 @@ export const refreshUncountedItemSnapshotOnOpen = createServerFn({ method: "POST
         item_id: z.string().uuid(),
         session_id: z.string().uuid(),
         live_snapshot: liveSnapshotInput,
+        reason: z.enum(["auto_refresh_on_first_open", "approval_guard_live_mismatch"]).optional(),
+        allow_current_draft: z.boolean().optional(),
       })
       .parse(input),
   )
@@ -222,16 +359,24 @@ export const refreshUncountedItemSnapshotOnOpen = createServerFn({ method: "POST
       throw new Error("الرصيد المباشر غير متاح.");
     }
 
-    const { data: itemRow, error: itemErr } = await context.supabase
+    const { data: beforeItem, error: itemErr } = await context.supabase
       .from("inventory_items")
-      .select("pack_size")
+      .select("pack_size, system_boxes, system_units, system_quantity_raw, raw_quantity_snapshot")
       .eq("id", data.item_id)
       .eq("session_id", data.session_id)
       .maybeSingle();
     if (itemErr) throw new Error(itemErr.message);
-    if (!itemRow) throw new Error("Inventory item not found");
+    if (!beforeItem) throw new Error("Inventory item not found");
 
-    const nextPackSize = normalizePackSize(live.pack_size) ?? normalizePackSize(itemRow.pack_size);
+    const { data: currentCount } = await context.supabase
+      .from("inventory_counts")
+      .select("id, status")
+      .eq("item_id", data.item_id)
+      .eq("session_id", data.session_id)
+      .eq("is_current", true)
+      .maybeSingle();
+
+    const nextPackSize = normalizePackSize(live.pack_size) ?? normalizePackSize(beforeItem.pack_size);
     if (!nextPackSize) {
       throw new Error("لا يمكن تحديث رصيد الجلسة لأن حجم العبوة غير متاح.");
     }
@@ -243,32 +388,49 @@ export const refreshUncountedItemSnapshotOnOpen = createServerFn({ method: "POST
       live.formatted_quantity ??
       formatQtyArabic({ boxes: live.system_boxes, strips: 0, units: live.system_units });
 
-    const { data: rpcRows, error: rpcErr } = await (context.supabase as any)
-      .rpc("refresh_uncounted_item_snapshot_on_open", {
-        _inventory_item_id: data.item_id,
-        _session_id: data.session_id,
-        _system_boxes: live.system_boxes,
-        _system_units: live.system_units,
-        _system_quantity_raw: nextFormatted,
-        _pack_size: nextPackSize,
-        _raw_quantity_snapshot: nextRaw,
-        _source_read_at: live.source_read_at ?? new Date().toISOString(),
-      });
-    if (rpcErr) throw new Error(rpcErr.message);
-
-    const result = Array.isArray(rpcRows) ? rpcRows[0] : rpcRows;
+    const reason = data.reason ?? "auto_refresh_on_first_open";
+    const allowCurrentDraft =
+      reason === "approval_guard_live_mismatch" ? true : Boolean(data.allow_current_draft);
+    const result = await refreshSnapshotFromLiveCache(context, {
+      item_id: data.item_id,
+      session_id: data.session_id,
+      reason,
+      allow_current_draft: allowCurrentDraft,
+    });
     const updated = Boolean(result?.updated);
+
+    const { data: afterItem, error: afterErr } = await context.supabase
+      .from("inventory_items")
+      .select("pack_size, system_boxes, system_units, system_quantity_raw, raw_quantity_snapshot")
+      .eq("id", data.item_id)
+      .eq("session_id", data.session_id)
+      .maybeSingle();
+    if (afterErr) throw new Error(afterErr.message);
+
+    if (process.env.NODE_ENV !== "production") {
+      console.info("[stockcount:snapshot-refresh]", {
+        item_id: data.item_id,
+        session_id: data.session_id,
+        reason,
+        before_snapshot_raw: beforeItem.raw_quantity_snapshot,
+        live_raw: nextRaw,
+        has_current_count: Boolean(currentCount),
+        current_count_status: currentCount?.status ?? null,
+        rpc_result: result,
+        after_snapshot_raw: afterItem?.raw_quantity_snapshot ?? null,
+      });
+    }
 
     return {
       updated,
       reason: String(result?.reason ?? (updated ? "updated" : "unknown")),
-      snapshot: updated
+      snapshot: updated && afterItem
         ? {
-            system_boxes: live.system_boxes,
-            system_units: live.system_units,
-            system_quantity_raw: nextFormatted,
-            pack_size: nextPackSize,
-            raw_quantity_snapshot: nextRaw,
+            system_boxes: afterItem.system_boxes,
+            system_units: afterItem.system_units,
+            system_quantity_raw: afterItem.system_quantity_raw,
+            pack_size: afterItem.pack_size,
+            raw_quantity_snapshot: afterItem.raw_quantity_snapshot,
           }
         : null,
     };

@@ -34,12 +34,14 @@ export const getLiveItemStock = createServerFn({ method: "POST" })
     z.object({
       external_item_id: z.string().min(1).max(64),
       inventory_item_id: z.string().uuid(),
+      forceRefresh: z.boolean().optional(),
     }).parse(input),
   )
   .handler(async ({ data }): Promise<LiveStock> => {
     const jwt = getBearer();
     const url = new URL(`${FUNCTIONS_BASE}/items/${encodeURIComponent(data.external_item_id)}/stock`);
     url.searchParams.set("inventoryItemId", data.inventory_item_id);
+    if (data.forceRefresh) url.searchParams.set("forceRefresh", "1");
     const res = await fetch(url.toString(), {
       headers: { Authorization: `Bearer ${jwt}`, Accept: "application/json" },
     });

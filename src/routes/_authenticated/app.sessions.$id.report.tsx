@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { FileDown, History, Search } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -82,6 +82,7 @@ type Row = {
   system_strips: number;
   system_units: number;
   system_quantity_raw: string | null;
+  raw_quantity_snapshot: number | string | null;
   created_at: string;
   last_purchase_price: number | null;
   inventory_counts: CountRow[] | null;
@@ -156,7 +157,7 @@ function ReportPage() {
         supabase
           .from("inventory_items")
           .select(
-            "id, session_id, row_index, external_item_id, item_name_raw, barcode, assigned_to, pack_size, system_boxes, system_strips, system_units, system_quantity_raw, created_at, last_purchase_price",
+            "id, session_id, row_index, external_item_id, item_name_raw, barcode, assigned_to, pack_size, system_boxes, system_strips, system_units, system_quantity_raw, raw_quantity_snapshot, created_at, last_purchase_price",
           )
           .eq("session_id", id)
           .order("row_index", { ascending: true })
@@ -309,6 +310,16 @@ function ReportPage() {
   const financialSummary = useMemo(() => summarizeFinancial(filteredRows), [filteredRows]);
   const visibleRows = useMemo(() => sortRows(grouped[activeStatus], sortBy), [activeStatus, grouped, sortBy]);
   const isAdmin = currentUser?.role === "admin";
+
+  useEffect(() => {
+    if (!reviewRow?.id) return;
+    const updated = rows.find((row) => row.id === reviewRow.id);
+    if (updated && updated !== reviewRow) setReviewRow(updated);
+  }, [rows, reviewRow?.id]);
+
+  const handleSnapshotRefreshed = useCallback(() => {
+    void refetch();
+  }, [refetch]);
 
   function exportVisibleRows() {
     if (visibleRows.length === 0) {
@@ -488,9 +499,7 @@ function ReportPage() {
         onCancelled={() => {
           void refetch();
         }}
-        onSnapshotRefreshed={() => {
-          void refetch();
-        }}
+        onSnapshotRefreshed={handleSnapshotRefreshed}
       />
     </div>
   );
@@ -1164,6 +1173,7 @@ function toCountSheetItem(row: Row) {
     system_strips: row.system_strips,
     system_units: row.system_units,
     system_quantity_raw: row.system_quantity_raw,
+    raw_quantity_snapshot: row.raw_quantity_snapshot,
     current: current
       ? {
           phys_boxes: current.phys_boxes,

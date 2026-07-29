@@ -7,7 +7,7 @@ import { cancelApprovedCount, refreshUncountedItemSnapshotOnOpen, saveCount } fr
 import { getLiveItemStock, type LiveStock } from "@/lib/teryaq-stock.functions";
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { formatQtyArabic, diffTriple, diffStatus } from "@/lib/quantity-parser";
+import { formatQtyArabic, diffTriple, diffStatus, normalizePackSize, qtyToRaw } from "@/lib/quantity-parser";
 import { cn } from "@/lib/utils";
 import { Package, Pill, Loader2, AlertTriangle } from "lucide-react";
 
@@ -22,6 +22,7 @@ type Item = {
   system_strips: number;
   system_units: number;
   system_quantity_raw: string | null;
+  raw_quantity_snapshot: number | string | null;
   current?: {
     phys_boxes: number;
     phys_strips: number;
@@ -67,10 +68,7 @@ export function CountSheet({
   const [snapshotOverride, setSnapshotOverride] = useState<SessionSnapshotOverride | null>(null);
   const [openSnap, setOpenSnap] = useState<LiveStock | null>(null);
   const [openedAt, setOpenedAt] = useState<string | null>(null);
-  const [recountBlock, setRecountBlock] = useState<
-    | null
-    | { reason: "stock_changed" | "pack_size_changed"; submit: LiveStock }
-  >(null);
+  const [approvalBlockMessage, setApprovalBlockMessage] = useState<string | null>(null);
   const save = useServerFn(saveCount);
   const cancelCount = useServerFn(cancelApprovedCount);
   const refreshSnapshotOnOpen = useServerFn(refreshUncountedItemSnapshotOnOpen);
@@ -88,7 +86,7 @@ export function CountSheet({
       setLiveError(null);
       setSnapshotOverride(null);
       setOpenSnap(null);
-      setRecountBlock(null);
+      setApprovalBlockMessage(null);
       setOpenedAt(null);
       if (item.external_item_id) {
         setLiveLoading(true);
@@ -112,6 +110,8 @@ export function CountSheet({
                     formatted_quantity: s.formattedQuantity,
                     source_read_at: s.readAt,
                   },
+                  reason: "auto_refresh_on_first_open",
+                  allow_current_draft: false,
                 },
               });
               if (refreshed.snapshot) {
@@ -140,20 +140,33 @@ export function CountSheet({
     if (countCleared && live) {
       return { boxes: live.systemBoxes, strips: 0, units: live.systemUnits };
     }
-    if (!item?.current && snapshotOverride) {
+    if (!isApproved && snapshotOverride) {
       return { boxes: snapshotOverride.systemBoxes, strips: 0, units: snapshotOverride.systemUnits };
     }
     return item
       ? { boxes: item.system_boxes, strips: item.system_strips, units: item.system_units }
       : { boxes: 0, strips: 0, units: 0 };
-  }, [item, countCleared, live, snapshotOverride]);
+  }, [item, countCleared, live, snapshotOverride, isApproved]);
 
   const displayedPackSize =
     (countCleared && live?.packSize)
       ? live.packSize
-      : (!item?.current && snapshotOverride?.packSize)
+      : (!isApproved && snapshotOverride?.packSize)
         ? snapshotOverride.packSize
         : (item?.pack_size ?? 1);
+
+  const displayedSnapshotRaw = useMemo(() => {
+    if (!item) return null;
+    const overrideRaw =
+      snapshotOverride?.rawQuantity == null ? null : Number(snapshotOverride.rawQuantity);
+    if (!isApproved && Number.isFinite(overrideRaw)) return overrideRaw;
+    const rowRaw = item.raw_quantity_snapshot == null ? null : Number(item.raw_quantity_snapshot);
+    if (Number.isFinite(rowRaw)) return rowRaw;
+    return qtyToRaw(
+      { boxes: displayedSys.boxes, units: displayedSys.units },
+      normalizePackSize(displayedPackSize),
+    );
+  }, [item, snapshotOverride, isApproved, displayedSys, displayedPackSize]);
 
   const diff = useMemo(() => {
     if (!item) return { boxes: 0, strips: 0, units: 0 };
@@ -194,28 +207,74 @@ export function CountSheet({
       toast.success("تم إلغاء اعتماد الصنف");
       onCancelled?.();
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: (e: Error) => {
+      toast.error(e.message);
+      if (e.message.includes("تغيّر رصيد الصنف")) {
+        setApprovalBlockMessage(e.message);
+        onSnapshotRefreshed?.();
+      }
+    },
   });
 
   const mut = useMutation({
     mutationFn: async (kind: "draft" | "approved") => {
       if (!item) return;
-      // On approve: fetch live again and compare with opening snapshot.
+      // On approve: fetch a fresh live snapshot and compare it with the
+      // session snapshot raw quantity. Live stock is not a calculation basis.
       let submitSnap: LiveStock | null = null;
-      let requires_recount = false;
-      let recount_reason: "stock_changed" | "pack_size_changed" | null = null;
-      if (kind === "approved" && item.external_item_id && openSnap) {
+      if (kind === "approved" && item.external_item_id && !isApproved) {
         try {
-          submitSnap = await fetchLive({ data: { external_item_id: item.external_item_id, inventory_item_id: item.id } });
-          if (submitSnap.rawQuantity !== openSnap.rawQuantity) {
-            requires_recount = true;
-            recount_reason = "stock_changed";
-          } else if (submitSnap.packSize !== openSnap.packSize) {
-            requires_recount = true;
-            recount_reason = "pack_size_changed";
+          submitSnap = await fetchLive({
+            data: {
+              external_item_id: item.external_item_id,
+              inventory_item_id: item.id,
+              forceRefresh: true,
+            },
+          });
+          setLive(submitSnap);
+          setOpenSnap(submitSnap);
+          setOpenedAt(new Date().toISOString());
+
+          if (submitSnap.rawQuantity == null || displayedSnapshotRaw == null) {
+            setApprovalBlockMessage("تعذر التحقق من الرصيد المباشر، حاول مرة أخرى.");
+            return { blocked: true as const, reason: "live_unavailable" as const };
           }
-        } catch {
-          // If refetch fails, don't block approval on change-detection.
+
+          if (submitSnap.rawQuantity !== displayedSnapshotRaw) {
+            const refreshed = await refreshSnapshotOnOpen({
+              data: {
+                item_id: item.id,
+                session_id: item.session_id,
+                live_snapshot: {
+                  raw_quantity: submitSnap.rawQuantity,
+                  pack_size: submitSnap.packSize,
+                  system_boxes: submitSnap.systemBoxes,
+                  system_units: submitSnap.systemUnits,
+                  formatted_quantity: submitSnap.formattedQuantity,
+                  source_read_at: submitSnap.readAt,
+                },
+                reason: "approval_guard_live_mismatch",
+                allow_current_draft: item.current?.status === "draft",
+              },
+            });
+            if (refreshed.snapshot) {
+              setSnapshotOverride({
+                systemBoxes: refreshed.snapshot.system_boxes,
+                systemUnits: refreshed.snapshot.system_units,
+                rawQuantity: refreshed.snapshot.raw_quantity_snapshot,
+                formattedQuantity: refreshed.snapshot.system_quantity_raw,
+                packSize: refreshed.snapshot.pack_size,
+              });
+              onSnapshotRefreshed?.();
+            }
+            setApprovalBlockMessage(
+              "تغيّر رصيد الصنف في المنظومة أثناء العد.\nتم تحديث رصيد الجلسة، يرجى مراجعة الكمية ثم الاعتماد من جديد.",
+            );
+            return { blocked: true as const, reason: "live_changed" as const };
+          }
+        } catch (e) {
+          setApprovalBlockMessage((e as Error).message || "تعذر التحقق من الرصيد المباشر، حاول مرة أخرى.");
+          return { blocked: true as const, reason: "live_unavailable" as const };
         }
       }
 
@@ -240,28 +299,6 @@ export function CountSheet({
           }
         : undefined;
 
-      // If a recount is required, save as draft with requires_recount=true and
-      // surface the choice to the user; do NOT approve the stale count.
-      if (requires_recount && recount_reason && submitSnap) {
-        await save({
-          data: {
-            item_id: item.id,
-            session_id: item.session_id,
-            phys_boxes: boxes,
-            phys_strips: item.current?.phys_strips ?? 0,
-            phys_units: units,
-            status: "draft",
-            client_operation_id: makeOpId(),
-            open_snapshot: openPayload,
-            submit_snapshot: submitPayload,
-            requires_recount: true,
-            recount_reason,
-          },
-        });
-        setRecountBlock({ reason: recount_reason, submit: submitSnap });
-        return { blocked: true as const };
-      }
-
       return save({
         data: {
           item_id: item.id,
@@ -284,9 +321,16 @@ export function CountSheet({
         return;
       }
       toast.success(kind === "approved" ? "تم اعتماد العدد" : "تم حفظ مسودة");
+      setApprovalBlockMessage(null);
       onSaved();
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: (e: Error) => {
+      toast.error(e.message);
+      if (e.message.includes("تغيّر رصيد الصنف")) {
+        setApprovalBlockMessage(e.message);
+        onSnapshotRefreshed?.();
+      }
+    },
   });
 
   async function refetchLiveNow() {
@@ -299,7 +343,7 @@ export function CountSheet({
       setLive(s);
       setOpenSnap(s);
       setOpenedAt(openedAtIso);
-      setRecountBlock(null);
+      setApprovalBlockMessage(null);
     } catch (e) {
       setLiveError((e as Error).message || "تعذر جلب الرصيد");
     } finally {
@@ -402,24 +446,10 @@ export function CountSheet({
                 </div>
               )}
 
-              {recountBlock && (
-                <div className="rounded-xl border border-destructive/40 bg-destructive/10 p-3 space-y-2">
-                  <div className="text-sm font-semibold text-destructive text-center">
-                    تغير رصيد المنظومة أثناء العد. يجب إعادة عد الصنف.
-                  </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <Button variant="outline" onClick={onClose}>
-                      تأجيل للمراجعة
-                    </Button>
-                    <Button
-                      onClick={() => {
-                        setBoxes(0);
-                        setUnits(0);
-                        void refetchLiveNow();
-                      }}
-                    >
-                      إعادة العد الآن
-                    </Button>
+              {approvalBlockMessage && (
+                <div className="rounded-xl border border-warning/40 bg-warning/10 p-3">
+                  <div className="text-sm font-semibold text-warning-foreground text-center whitespace-pre-line">
+                    {approvalBlockMessage}
                   </div>
                 </div>
               )}
@@ -447,6 +477,7 @@ export function CountSheet({
                   onChange={(value) => {
                     setBoxes(value);
                     setCountStarted(true);
+                    setApprovalBlockMessage(null);
                   }}
                   inputId="qty-boxes"
                   nextId="qty-units"
@@ -459,6 +490,7 @@ export function CountSheet({
                   onChange={(value) => {
                     setUnits(value);
                     setCountStarted(true);
+                    setApprovalBlockMessage(null);
                   }}
                   inputId="qty-units"
                   nextId="btn-confirm"
@@ -499,7 +531,7 @@ export function CountSheet({
                 <Button
                   id="btn-confirm"
                   className="h-14 font-bold text-base"
-                  disabled={isApproved || mut.isPending || liveLoading || !!recountBlock}
+                  disabled={isApproved || mut.isPending || liveLoading}
                   onClick={() => mut.mutate("approved")}
                 >
                   {isApproved ? "تم الاعتماد" : "اعتماد العدد"}
