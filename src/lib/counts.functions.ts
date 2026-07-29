@@ -21,8 +21,6 @@ const liveSnapshotInput = z.object({
 });
 
 const FUNCTIONS_BASE = `${process.env.SUPABASE_URL ?? ""}/functions/v1/teryaq-stockcount-proxy`;
-const LIVE_STOCK_CHANGED_MESSAGE =
-  "تغيّر رصيد الصنف في المنظومة أثناء العد.\nتم تحديث رصيد الجلسة، يرجى مراجعة الكمية ثم الاعتماد من جديد.";
 const LIVE_STOCK_UNAVAILABLE_MESSAGE = "تعذر التحقق من الرصيد المباشر، حاول مرة أخرى.";
 
 type ServerLiveStock = {
@@ -32,6 +30,7 @@ type ServerLiveStock = {
   formattedQuantity: string | null;
   packSize: number | null;
   readAt: string | null;
+  source: "live" | "cached" | "fallback";
 };
 
 function getBearer(): string {
@@ -92,27 +91,8 @@ async function fetchFreshLiveStockForApproval(
     formattedQuantity: (src.formattedQuantity as string | null) ?? null,
     packSize: packSize == null ? null : Math.trunc(packSize),
     readAt: (src.readAt as string | null) ?? null,
+    source: src.source === "cached" || src.source === "fallback" ? src.source : "live",
   };
-}
-
-async function refreshSnapshotFromLiveCache(
-  context: { supabase: any },
-  data: {
-    item_id: string;
-    session_id: string;
-    reason: string;
-    allow_current_draft: boolean;
-  },
-) {
-  const { data: rpcRows, error: rpcErr } = await (context.supabase as any)
-    .rpc("refresh_inventory_item_snapshot_from_live", {
-      _inventory_item_id: data.item_id,
-      _session_id: data.session_id,
-      _refresh_reason: data.reason,
-      _allow_current_draft: data.allow_current_draft,
-    });
-  if (rpcErr) throw new Error(rpcErr.message);
-  return Array.isArray(rpcRows) ? rpcRows[0] : rpcRows;
 }
 
 async function refreshSnapshotFromLiveValues(
@@ -189,11 +169,6 @@ export const saveCount = createServerFn({ method: "POST" })
       .parse(input),
   )
   .handler(async ({ data, context }) => {
-    const { data: isAdmin } = await context.supabase.rpc("has_role", {
-      _user_id: context.userId,
-      _role: "admin",
-    });
-
     // Idempotency: return existing row if already saved with this operation id.
     const { data: existing } = await context.supabase
       .from("inventory_counts")
@@ -211,7 +186,7 @@ export const saveCount = createServerFn({ method: "POST" })
       .eq("is_current", true)
       .maybeSingle();
 
-    if (current?.status === "approved" && !isAdmin) {
+    if (current?.status === "approved") {
       throw new Error("تم اعتماد هذا الصنف ولا يمكن تعديله.");
     }
 
@@ -224,12 +199,14 @@ export const saveCount = createServerFn({ method: "POST" })
     if (itemErr) throw new Error(itemErr.message);
     if (!itemRow) throw new Error("Inventory item not found");
 
-    // Difference calculations must remain tied to the fixed session snapshot.
-    // Live open/submit snapshots are stored for audit/recount only.
+    // Approved counts are stored with the live stock fetched at submit time.
+    // Session snapshot remains a reference and must not change historical approvals.
     const packSize = normalizePackSize(itemRow.pack_size);
     const systemBoxes = itemRow.system_boxes;
     const systemUnits = itemRow.system_units;
     let verifiedSubmitSnapshot = data.submit_snapshot;
+    let referencePackSize = packSize;
+    let referenceRaw = qtyToRaw({ boxes: systemBoxes, units: systemUnits }, packSize);
 
     if (data.status === "approved" && current?.status !== "approved") {
       if (!itemRow.external_item_id) {
@@ -237,15 +214,15 @@ export const saveCount = createServerFn({ method: "POST" })
       }
 
       const latestLive = await fetchFreshLiveStockForApproval(itemRow.external_item_id, data.item_id);
-      const snapshotRaw =
-        finiteNumber(itemRow.raw_quantity_snapshot) ??
-        qtyToRaw({ boxes: systemBoxes, units: systemUnits }, packSize);
       const liveRaw = finiteNumber(latestLive.rawQuantity);
+      const livePackSize = normalizePackSize(latestLive.packSize) ?? packSize;
 
-      if (snapshotRaw == null || liveRaw == null) {
+      if (latestLive.source === "fallback" || liveRaw == null || !livePackSize) {
         throw new Error(LIVE_STOCK_UNAVAILABLE_MESSAGE);
       }
 
+      referencePackSize = livePackSize;
+      referenceRaw = liveRaw;
       verifiedSubmitSnapshot = {
         raw_quantity: latestLive.rawQuantity,
         pack_size: latestLive.packSize,
@@ -254,27 +231,21 @@ export const saveCount = createServerFn({ method: "POST" })
         source_read_at: latestLive.readAt,
         submitted_at: new Date().toISOString(),
       };
-
-      if (liveRaw !== snapshotRaw) {
-        const result = await refreshSnapshotFromLiveCache(context, {
-          item_id: data.item_id,
-          session_id: data.session_id,
-          reason: "approval_guard_live_mismatch",
-          allow_current_draft: current?.status === "draft",
-        });
-        if (!result?.updated && result?.reason === "missing_live_stock") {
-          throw new Error(LIVE_STOCK_UNAVAILABLE_MESSAGE);
-        }
-        throw new Error(LIVE_STOCK_CHANGED_MESSAGE);
+    } else if (current?.status !== "approved") {
+      const liveReference = data.submit_snapshot ?? data.open_snapshot;
+      const liveReferenceRaw = finiteNumber(liveReference?.raw_quantity);
+      const liveReferencePackSize = normalizePackSize(liveReference?.pack_size) ?? packSize;
+      if (liveReferenceRaw != null && liveReferencePackSize) {
+        referencePackSize = liveReferencePackSize;
+        referenceRaw = liveReferenceRaw;
       }
     }
 
-    const physicalRaw = qtyToRaw({ boxes: data.phys_boxes, units: data.phys_units }, packSize);
-    const systemRaw = qtyToRaw({ boxes: systemBoxes, units: systemUnits }, packSize);
+    const physicalRaw = qtyToRaw({ boxes: data.phys_boxes, units: data.phys_units }, referencePackSize);
     const differenceRaw =
-      physicalRaw == null || systemRaw == null ? null : physicalRaw - systemRaw;
+      physicalRaw == null || referenceRaw == null ? null : physicalRaw - referenceRaw;
     const differenceQty =
-      differenceRaw == null || !packSize ? null : rawToQty(differenceRaw, packSize);
+      differenceRaw == null || !referencePackSize ? null : rawToQty(differenceRaw, referencePackSize);
     const diffCols =
       differenceRaw == null || !differenceQty
         ? {

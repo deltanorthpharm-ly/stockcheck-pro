@@ -3,11 +3,11 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sh
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useServerFn } from "@tanstack/react-start";
-import { cancelApprovedCount, refreshUncountedItemSnapshotOnOpen, saveCount } from "@/lib/counts.functions";
+import { cancelApprovedCount, saveCount } from "@/lib/counts.functions";
 import { getLiveItemStock, type LiveStock } from "@/lib/teryaq-stock.functions";
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { formatQtyArabic, diffTriple, diffStatus, normalizePackSize, qtyToRaw } from "@/lib/quantity-parser";
+import { formatQtyArabic, diffTriple, diffStatus, normalizePackSize } from "@/lib/quantity-parser";
 import { cn } from "@/lib/utils";
 import { Package, Pill, Loader2, AlertTriangle } from "lucide-react";
 
@@ -31,33 +31,20 @@ type Item = {
   };
 };
 
-type SessionSnapshotOverride = {
-  systemBoxes: number;
-  systemUnits: number;
-  rawQuantity: number | null;
-  formattedQuantity: string | null;
-  packSize: number | null;
-};
+type ApprovalGateState = "idle" | "checking" | "ready" | "blocked";
 
-type ApprovalGateState = "idle" | "checking" | "refreshing" | "ready" | "blocked";
-
-const STOCK_CHANGED_BEFORE_APPROVAL_MESSAGE =
-  "تغيّر رصيد الصنف في المنظومة، يجب تحديث رصيد الجلسة قبل الاعتماد.";
-const SNAPSHOT_REFRESH_FAILED_MESSAGE = "تعذر تحديث رصيد الجلسة، لا يمكن اعتماد الصنف الآن.";
-const LIVE_UNAVAILABLE_MESSAGE = "تعذر التحقق من الرصيد المباشر، حاول مرة أخرى.";
-const LIVE_CHANGED_REVIEW_MESSAGE =
-  "تغيّر رصيد الصنف في المنظومة أثناء العد.\nتم تحديث رصيد الجلسة، يرجى مراجعة الكمية ثم الاعتماد من جديد.";
+const LIVE_UNAVAILABLE_MESSAGE = "لا يمكن اعتماد الصنف لأن الرصيد المباشر غير متاح.";
 
 function makeOpId() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function getItemSnapshotRaw(item: Item): number | null {
-  const raw = item.raw_quantity_snapshot == null ? null : Number(item.raw_quantity_snapshot);
-  if (Number.isFinite(raw)) return raw;
-  return qtyToRaw(
-    { boxes: item.system_boxes, units: item.system_units },
-    normalizePackSize(item.pack_size),
+function isUsableLiveStock(live: LiveStock | null, fallbackPackSize: number | null | undefined) {
+  return (
+    Boolean(live) &&
+    live?.source !== "fallback" &&
+    live?.rawQuantity != null &&
+    Boolean(normalizePackSize(live.packSize ?? fallbackPackSize ?? null))
   );
 }
 
@@ -83,7 +70,6 @@ export function CountSheet({
   const [live, setLive] = useState<LiveStock | null>(null);
   const [liveLoading, setLiveLoading] = useState(false);
   const [liveError, setLiveError] = useState<string | null>(null);
-  const [snapshotOverride, setSnapshotOverride] = useState<SessionSnapshotOverride | null>(null);
   const [openSnap, setOpenSnap] = useState<LiveStock | null>(null);
   const [openedAt, setOpenedAt] = useState<string | null>(null);
   const [approvalBlockMessage, setApprovalBlockMessage] = useState<string | null>(null);
@@ -91,7 +77,6 @@ export function CountSheet({
   const [approvalGateMessage, setApprovalGateMessage] = useState<string | null>(null);
   const save = useServerFn(saveCount);
   const cancelCount = useServerFn(cancelApprovedCount);
-  const refreshSnapshotOnOpen = useServerFn(refreshUncountedItemSnapshotOnOpen);
   const fetchLive = useServerFn(getLiveItemStock);
   const isApproved = item?.current?.status === "approved" && !countCleared;
   const showClearedState = countCleared && !countStarted;
@@ -104,7 +89,6 @@ export function CountSheet({
       setCountStarted(false);
       setLive(null);
       setLiveError(null);
-      setSnapshotOverride(null);
       setOpenSnap(null);
       setApprovalBlockMessage(null);
       setApprovalGate(item.current?.status === "approved" ? "ready" : "checking");
@@ -114,7 +98,7 @@ export function CountSheet({
         setLiveLoading(true);
         const openedAtIso = new Date().toISOString();
         fetchLive({ data: { external_item_id: item.external_item_id, inventory_item_id: item.id } })
-          .then(async (s) => {
+          .then((s) => {
             setLive(s);
             setOpenSnap(s);
             setOpenedAt(openedAtIso);
@@ -123,65 +107,13 @@ export function CountSheet({
               setApprovalGate("ready");
               return;
             }
-
-            const snapshotRaw = getItemSnapshotRaw(item);
-            if (s.rawQuantity == null || snapshotRaw == null) {
+            if (!isUsableLiveStock(s, item.pack_size)) {
               setApprovalGate("blocked");
               setApprovalGateMessage(LIVE_UNAVAILABLE_MESSAGE);
               return;
             }
-
-            if (s.rawQuantity === snapshotRaw) {
-              setApprovalGate("ready");
-              setApprovalGateMessage(null);
-              return;
-            }
-
-            setApprovalGate("refreshing");
-            setApprovalGateMessage(STOCK_CHANGED_BEFORE_APPROVAL_MESSAGE);
-            try {
-              const refreshed = await refreshSnapshotOnOpen({
-                data: {
-                  item_id: item.id,
-                  session_id: item.session_id,
-                  live_snapshot: {
-                    raw_quantity: s.rawQuantity,
-                    pack_size: s.packSize,
-                    system_boxes: s.systemBoxes,
-                    system_units: s.systemUnits,
-                    formatted_quantity: s.formattedQuantity,
-                    source_read_at: s.readAt,
-                  },
-                  reason: item.current?.status === "draft"
-                    ? "approval_guard_live_mismatch"
-                    : "auto_refresh_on_first_open",
-                  allow_current_draft: item.current?.status === "draft",
-                },
-              });
-              const refreshedRaw = refreshed.snapshot?.raw_quantity_snapshot == null
-                ? null
-                : Number(refreshed.snapshot.raw_quantity_snapshot);
-
-              if (refreshed.snapshot && Number.isFinite(refreshedRaw) && refreshedRaw === s.rawQuantity) {
-                setSnapshotOverride({
-                  systemBoxes: refreshed.snapshot.system_boxes,
-                  systemUnits: refreshed.snapshot.system_units,
-                  rawQuantity: refreshed.snapshot.raw_quantity_snapshot,
-                  formattedQuantity: refreshed.snapshot.system_quantity_raw,
-                  packSize: refreshed.snapshot.pack_size,
-                });
-                setApprovalGate("ready");
-                setApprovalGateMessage(null);
-                await onSnapshotRefreshed?.();
-                return;
-              }
-
-              setApprovalGate("blocked");
-              setApprovalGateMessage(SNAPSHOT_REFRESH_FAILED_MESSAGE);
-            } catch {
-              setApprovalGate("blocked");
-              setApprovalGateMessage(SNAPSHOT_REFRESH_FAILED_MESSAGE);
-            }
+            setApprovalGate("ready");
+            setApprovalGateMessage(null);
           })
           .catch((e: Error) => {
             setApprovalGate(item.current?.status === "approved" ? "ready" : "blocked");
@@ -194,50 +126,40 @@ export function CountSheet({
         setApprovalGateMessage(LIVE_UNAVAILABLE_MESSAGE);
       }
     }
-  }, [item, fetchLive, refreshSnapshotOnOpen, onSnapshotRefreshed]);
+  }, [item, fetchLive]);
 
-  // Inventory differences must always use the fixed session snapshot.
-  // Live stock is displayed separately and is only used for recount validation.
+  // Approved counts keep their saved result. New/unapproved counts compare
+  // against the latest live stock; the session snapshot remains a reference.
   const displayedSys = useMemo(() => {
     if (countCleared && live) {
       return { boxes: live.systemBoxes, strips: 0, units: live.systemUnits };
     }
-    if (!isApproved && snapshotOverride) {
-      return { boxes: snapshotOverride.systemBoxes, strips: 0, units: snapshotOverride.systemUnits };
-    }
     return item
       ? { boxes: item.system_boxes, strips: item.system_strips, units: item.system_units }
       : { boxes: 0, strips: 0, units: 0 };
-  }, [item, countCleared, live, snapshotOverride, isApproved]);
+  }, [item, countCleared, live]);
 
   const displayedPackSize =
     (countCleared && live?.packSize)
       ? live.packSize
-      : (!isApproved && snapshotOverride?.packSize)
-        ? snapshotOverride.packSize
-        : (item?.pack_size ?? 1);
+      : (item?.pack_size ?? 1);
 
-  const displayedSnapshotRaw = useMemo(() => {
-    if (!item) return null;
-    const overrideRaw =
-      snapshotOverride?.rawQuantity == null ? null : Number(snapshotOverride.rawQuantity);
-    if (!isApproved && Number.isFinite(overrideRaw)) return overrideRaw;
-    const rowRaw = item.raw_quantity_snapshot == null ? null : Number(item.raw_quantity_snapshot);
-    if (Number.isFinite(rowRaw)) return rowRaw;
-    return qtyToRaw(
-      { boxes: displayedSys.boxes, units: displayedSys.units },
-      normalizePackSize(displayedPackSize),
-    );
-  }, [item, snapshotOverride, isApproved, displayedSys, displayedPackSize]);
+  const livePackSize = normalizePackSize(live?.packSize ?? item?.pack_size ?? null);
+  const canUseLiveComparison = !isApproved && isUsableLiveStock(live, item?.pack_size);
+  const comparisonSys = canUseLiveComparison && live
+    ? { boxes: live.systemBoxes, strips: 0, units: live.systemUnits }
+    : displayedSys;
+  const comparisonPackSize = canUseLiveComparison && livePackSize ? livePackSize : displayedPackSize;
 
   const diff = useMemo(() => {
     if (!item) return { boxes: 0, strips: 0, units: 0 };
-    return diffTriple(displayedSys, { boxes, strips: displayedSys.strips, units }, displayedPackSize);
-  }, [item, boxes, units, displayedSys, displayedPackSize]);
+    return diffTriple(comparisonSys, { boxes, strips: comparisonSys.strips, units }, comparisonPackSize);
+  }, [item, boxes, units, comparisonSys, comparisonPackSize]);
 
   const status = useMemo(() => diffStatus(diff), [diff]);
   const approvalStatusMessage = approvalBlockMessage ?? approvalGateMessage;
   const approveBlockedByStock = !isApproved && approvalGate !== "ready";
+  const canShowDiffPreview = isApproved || canUseLiveComparison;
 
   const cancelMut = useMutation({
     mutationFn: async () => {
@@ -299,62 +221,18 @@ export function CountSheet({
           setOpenSnap(submitSnap);
           setOpenedAt(new Date().toISOString());
 
-          if (submitSnap.rawQuantity == null || displayedSnapshotRaw == null) {
+          if (!isUsableLiveStock(submitSnap, item.pack_size)) {
             setApprovalGate("blocked");
             setApprovalGateMessage(LIVE_UNAVAILABLE_MESSAGE);
             setApprovalBlockMessage(LIVE_UNAVAILABLE_MESSAGE);
             return { blocked: true as const, reason: "live_unavailable" as const };
           }
-
-          if (submitSnap.rawQuantity !== displayedSnapshotRaw) {
-            setApprovalGate("refreshing");
-            setApprovalGateMessage(STOCK_CHANGED_BEFORE_APPROVAL_MESSAGE);
-            const refreshed = await refreshSnapshotOnOpen({
-              data: {
-                item_id: item.id,
-                session_id: item.session_id,
-                live_snapshot: {
-                  raw_quantity: submitSnap.rawQuantity,
-                  pack_size: submitSnap.packSize,
-                  system_boxes: submitSnap.systemBoxes,
-                  system_units: submitSnap.systemUnits,
-                  formatted_quantity: submitSnap.formattedQuantity,
-                  source_read_at: submitSnap.readAt,
-                },
-                reason: "approval_guard_live_mismatch",
-                allow_current_draft: item.current?.status === "draft",
-              },
-            });
-            if (refreshed.snapshot) {
-              const refreshedRaw = refreshed.snapshot.raw_quantity_snapshot == null
-                ? null
-                : Number(refreshed.snapshot.raw_quantity_snapshot);
-              setSnapshotOverride({
-                systemBoxes: refreshed.snapshot.system_boxes,
-                systemUnits: refreshed.snapshot.system_units,
-                rawQuantity: refreshed.snapshot.raw_quantity_snapshot,
-                formattedQuantity: refreshed.snapshot.system_quantity_raw,
-                packSize: refreshed.snapshot.pack_size,
-              });
-              if (Number.isFinite(refreshedRaw) && refreshedRaw === submitSnap.rawQuantity) {
-                setApprovalGate("ready");
-                setApprovalGateMessage(null);
-              } else {
-                setApprovalGate("blocked");
-                setApprovalGateMessage(SNAPSHOT_REFRESH_FAILED_MESSAGE);
-              }
-              await onSnapshotRefreshed?.();
-            } else {
-              setApprovalGate("blocked");
-              setApprovalGateMessage(SNAPSHOT_REFRESH_FAILED_MESSAGE);
-            }
-            setApprovalBlockMessage(LIVE_CHANGED_REVIEW_MESSAGE);
-            return { blocked: true as const, reason: "live_changed" as const };
-          }
+          setApprovalGate("ready");
+          setApprovalGateMessage(null);
         } catch (e) {
           setApprovalGate("blocked");
-          setApprovalGateMessage(SNAPSHOT_REFRESH_FAILED_MESSAGE);
-          setApprovalBlockMessage((e as Error).message || SNAPSHOT_REFRESH_FAILED_MESSAGE);
+          setApprovalGateMessage(LIVE_UNAVAILABLE_MESSAGE);
+          setApprovalBlockMessage((e as Error).message || LIVE_UNAVAILABLE_MESSAGE);
           return { blocked: true as const, reason: "live_unavailable" as const };
         }
       }
@@ -426,56 +304,12 @@ export function CountSheet({
       setOpenedAt(openedAtIso);
       setApprovalBlockMessage(null);
       if (!isApproved) {
-        if (s.rawQuantity == null || displayedSnapshotRaw == null) {
+        if (!isUsableLiveStock(s, item.pack_size)) {
           setApprovalGate("blocked");
           setApprovalGateMessage(LIVE_UNAVAILABLE_MESSAGE);
-        } else if (s.rawQuantity === displayedSnapshotRaw) {
+        } else {
           setApprovalGate("ready");
           setApprovalGateMessage(null);
-        } else {
-          setApprovalGate("refreshing");
-          setApprovalGateMessage(STOCK_CHANGED_BEFORE_APPROVAL_MESSAGE);
-          try {
-            const refreshed = await refreshSnapshotOnOpen({
-              data: {
-                item_id: item.id,
-                session_id: item.session_id,
-                live_snapshot: {
-                  raw_quantity: s.rawQuantity,
-                  pack_size: s.packSize,
-                  system_boxes: s.systemBoxes,
-                  system_units: s.systemUnits,
-                  formatted_quantity: s.formattedQuantity,
-                  source_read_at: s.readAt,
-                },
-                reason: item.current?.status === "draft"
-                  ? "approval_guard_live_mismatch"
-                  : "auto_refresh_on_first_open",
-                allow_current_draft: item.current?.status === "draft",
-              },
-            });
-            const refreshedRaw = refreshed.snapshot?.raw_quantity_snapshot == null
-              ? null
-              : Number(refreshed.snapshot.raw_quantity_snapshot);
-            if (refreshed.snapshot && Number.isFinite(refreshedRaw) && refreshedRaw === s.rawQuantity) {
-              setSnapshotOverride({
-                systemBoxes: refreshed.snapshot.system_boxes,
-                systemUnits: refreshed.snapshot.system_units,
-                rawQuantity: refreshed.snapshot.raw_quantity_snapshot,
-                formattedQuantity: refreshed.snapshot.system_quantity_raw,
-                packSize: refreshed.snapshot.pack_size,
-              });
-              setApprovalGate("ready");
-              setApprovalGateMessage(null);
-              await onSnapshotRefreshed?.();
-            } else {
-              setApprovalGate("blocked");
-              setApprovalGateMessage(SNAPSHOT_REFRESH_FAILED_MESSAGE);
-            }
-          } catch {
-            setApprovalGate("blocked");
-            setApprovalGateMessage(SNAPSHOT_REFRESH_FAILED_MESSAGE);
-          }
         }
       }
     } catch (e) {
@@ -571,7 +405,7 @@ export function CountSheet({
                     </div>
                   ) : liveError ? (
                     <div className="text-[11px] text-muted-foreground text-center">
-                      يتم استخدام رصيد الجلسة للحساب. الرصيد المباشر للعرض فقط.
+                      لا يمكن حساب الفرق أو اعتماد الصنف بدون الرصيد المباشر.
                     </div>
                   ) : null}
                   {live?.formattedQuantity && (
@@ -634,7 +468,11 @@ export function CountSheet({
                 />
               </div>
 
-              {showClearedState ? (
+              {!canShowDiffPreview ? (
+                <div className="rounded-xl p-3 text-sm font-semibold text-center bg-muted text-muted-foreground">
+                  لا يمكن حساب الفرق قبل توفر الرصيد المباشر.
+                </div>
+              ) : showClearedState ? (
                 <div className="rounded-xl p-3 text-sm font-semibold text-center bg-muted text-muted-foreground">
                   لم يتم إدخال عد جديد
                 </div>
