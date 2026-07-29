@@ -131,6 +131,7 @@ function mapTeryaqItemsToInventoryRows(
     const convStatus = (it["conversionStatus"] as string | null) ?? null;
     const formatted = (it["formattedQuantity"] as string | null) ?? null;
     const rawQty = it["rawQuantity"] == null ? null : Number(it["rawQuantity"]);
+    const lastPurchasePrice = it["lastPurchasePrice"] == null ? null : Number(it["lastPurchasePrice"]);
     const hasFractionalQuantity =
       (boxesSnap != null && !Number.isInteger(boxesSnap)) ||
       (unitsSnap != null && !Number.isInteger(unitsSnap));
@@ -152,6 +153,7 @@ function mapTeryaqItemsToInventoryRows(
       item_name_raw: name,
       barcode: (it["barcode"] as string | null) ?? null,
       selling_price: it["sellingPrice"] == null ? 0 : Number(it["sellingPrice"]),
+      last_purchase_price: Number.isFinite(lastPurchasePrice) ? lastPurchasePrice : null,
       expiry_date: (it["expiryDate"] as string | null) ?? null,
       system_quantity_raw: formatted ?? String(rawQty ?? 0),
       system_boxes: hasFractionalQuantity ? 0 : integerOrZero(boxesSnap),
@@ -207,7 +209,7 @@ function findOffendingInventoryValue(
           "system_units_snapshot",
         ]
       : pgType.includes("numeric")
-        ? ["selling_price", "raw_quantity_snapshot"]
+        ? ["selling_price", "last_purchase_price", "raw_quantity_snapshot"]
         : pgType.includes("timestamp")
           ? ["source_read_at"]
           : [];

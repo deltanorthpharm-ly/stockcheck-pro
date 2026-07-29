@@ -83,7 +83,7 @@ type Row = {
   system_units: number;
   system_quantity_raw: string | null;
   created_at: string;
-  selling_price: number | null;
+  last_purchase_price: number | null;
   inventory_counts: CountRow[] | null;
   snapshot_audits: SnapshotAuditRow[];
   unapproval_audits: UnapprovalAuditRow[];
@@ -156,7 +156,7 @@ function ReportPage() {
         supabase
           .from("inventory_items")
           .select(
-            "id, session_id, row_index, external_item_id, item_name_raw, barcode, assigned_to, pack_size, system_boxes, system_strips, system_units, system_quantity_raw, created_at, selling_price",
+            "id, session_id, row_index, external_item_id, item_name_raw, barcode, assigned_to, pack_size, system_boxes, system_strips, system_units, system_quantity_raw, created_at, last_purchase_price",
           )
           .eq("session_id", id)
           .order("row_index", { ascending: true })
@@ -380,18 +380,29 @@ function ReportPage() {
         <p className="text-xs text-muted-foreground">صفحة مراجعة المدير: فروقات، قيمة مالية، اعتماد، وسجل الصنف.</p>
       </div>
 
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+        <Tile label="إجمالي الأصناف" value={filteredRows.length} tone="primary" />
         <Tile label="مطابق" value={grouped.matched.length} tone="success" />
         <Tile label="عجز" value={grouped.shortage.length} tone="destructive" />
         <Tile label="زيادة" value={grouped.excess.length} tone="info" />
         <Tile label="لم يُعد" value={grouped.uncounted.length} tone="muted" />
       </div>
 
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-        <MoneyTile label="إجمالي قيمة العجز" value={financialSummary.shortageValue} tone="destructive" />
-        <MoneyTile label="إجمالي قيمة الزيادة" value={financialSummary.excessValue} tone="info" />
-        <MoneyTile label="صافي الفرق المالي" value={financialSummary.netValue} tone={financialSummary.netValue == null ? "muted" : financialSummary.netValue >= 0 ? "info" : "destructive"} />
-      </div>
+      {financialSummary.hasAnyPurchasePrice ? (
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+          <MoneyTile label="إجمالي قيمة العجز" value={financialSummary.shortageValue ?? 0} tone="destructive" />
+          <MoneyTile label="إجمالي قيمة الزيادة" value={financialSummary.excessValue ?? 0} tone="info" />
+          <MoneyTile label="صافي الفرق المالي" value={financialSummary.netValue ?? 0} tone={(financialSummary.netValue ?? 0) >= 0 ? "info" : "destructive"} />
+        </div>
+      ) : (
+        <Card className="flex items-center gap-3 p-3">
+          <div className="grid size-10 place-items-center rounded-full bg-muted text-lg">💰</div>
+          <div>
+            <div className="text-sm font-bold">القيمة المالية غير متاحة</div>
+            <div className="text-xs text-muted-foreground">لا يوجد سعر شراء محفوظ لهذه النتائج.</div>
+          </div>
+        </Card>
+      )}
 
       <Card className="space-y-3 p-3">
         <div className="relative">
@@ -521,6 +532,7 @@ function groupRows(rows: Row[]) {
 
 function Tile({ label, value, tone }: { label: string; value: number; tone: string }) {
   const cls =
+    tone === "primary" ? "text-primary" :
     tone === "success" ? "text-success" :
     tone === "destructive" ? "text-destructive" :
     tone === "info" ? "text-info" : "text-muted-foreground";
@@ -544,6 +556,74 @@ function MoneyTile({ label, value, tone }: { label: string; value: number | null
       <div className="text-[11px] font-semibold text-muted-foreground">{label}</div>
       <div className={`mt-1 text-lg font-extrabold ${cls}`}>{value == null ? "غير متوفر" : `${formatMoney(value)} د.ل`}</div>
     </Card>
+  );
+}
+
+function DiffChip({
+  diff,
+  kind,
+  packSize,
+}: {
+  diff: SavedDiff | null;
+  kind: "shortage" | "excess" | "match" | "none";
+  packSize: number | null;
+}) {
+  const status = normalizeInventoryDiffStatus(diff?.diff_status);
+  if (!diff || kind === "none" || !status) {
+    return (
+      <span className="shrink-0 rounded-full bg-muted/60 px-2 py-0.5 text-xs font-bold leading-5 text-muted-foreground">
+        غير محدد
+      </span>
+    );
+  }
+
+  if (status === "match") {
+    return (
+      <span className="shrink-0 rounded-full bg-success/10 px-2 py-0.5 text-xs font-bold leading-5 text-success">
+        مطابق
+      </span>
+    );
+  }
+
+  const raw = Number(diff.difference_raw);
+  const qty = Number.isFinite(raw)
+    ? rawToQty(raw, packSize ?? 1)
+    : {
+        boxes: Number(diff.difference_boxes ?? 0),
+        strips: 0,
+        units: Number(diff.difference_units ?? 0),
+        raw: 0,
+      };
+  const toneClass = status === "shortage" ? "bg-destructive/10 text-destructive" : "bg-info/10 text-info";
+  const icon = status === "shortage" ? "🔻" : "🔺";
+  const label = status === "shortage" ? "عجز" : "زيادة";
+  const parts = [
+    qty.boxes ? `${formatNumber(Math.abs(qty.boxes))} علبة` : null,
+    qty.units ? `${formatNumber(Math.abs(qty.units))} وحدة` : null,
+  ].filter(Boolean);
+
+  return (
+    <div className={`shrink-0 rounded-xl px-2.5 py-1 text-center text-[11px] font-extrabold leading-4 ${toneClass}`}>
+      <div>{icon} {label}</div>
+      {parts.length > 0 && (
+        <div className="mt-0.5 font-bold">
+          {parts.join(" + ")}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function QuantityCard({ icon, label, value }: { icon: string; label: string; value: string[] }) {
+  return (
+    <div className="rounded-lg border bg-muted/30 px-2 py-2">
+      <div className="text-[11px] font-semibold text-muted-foreground">{icon} {label}</div>
+      <div className="mt-1 space-y-0.5 text-sm font-bold leading-5">
+        {value.map((line, index) => (
+          <div key={`${label}-${index}`}>{line}</div>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -585,29 +665,34 @@ function RowList({
                   </span>
                 </div>
               </div>
-              <span className={`shrink-0 rounded-full bg-muted/60 px-2 py-0.5 text-xs font-bold leading-5 ${differenceTone(kind)}`}>
-                {formatInventoryDiffBadge(diff, row.pack_size)}
-              </span>
+              <DiffChip diff={diff} kind={kind} packSize={row.pack_size} />
             </div>
 
             {approval && (
-              <div className="rounded-md bg-muted/50 px-2 py-1.5 text-[11px] leading-5">
-                <div className="font-semibold text-foreground">تم الاعتماد بواسطة: {approval.userName}</div>
-                <div className="text-muted-foreground">
-                  {formatDate(approval.at)} · {formatTime(approval.at)}
+              <div className="flex items-center justify-between gap-3 rounded-lg border border-success/20 bg-success/5 px-3 py-2 text-[11px] leading-4">
+                <div className="min-w-0">
+                  <div className="font-bold text-success">✔ تم الاعتماد</div>
+                  <div className="truncate text-foreground">{approval.userName}</div>
+                </div>
+                <div className="shrink-0 text-left text-muted-foreground">
+                  <div>{formatDate(approval.at)}</div>
+                  <div>{formatTime(approval.at)}</div>
                 </div>
               </div>
             )}
 
+            <div className="grid grid-cols-2 gap-2">
+              <QuantityCard icon="📦" label="النظام" value={formatQtyLines(row.system_quantity_raw || formatQtyArabic(systemQty))} />
+              <QuantityCard icon="📋" label="الفعلي" value={physicalQty ? formatQtyLines(formatQtyArabic(physicalQty)) : ["غير محدد"]} />
+            </div>
+
             <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] leading-4">
-              <CompactMeta label="النظام" value={row.system_quantity_raw || formatQtyArabic(systemQty)} />
-              <CompactMeta label="الفعلي" value={physicalQty ? formatQtyArabic(physicalQty) : "غير محدد"} />
               <EmployeeMeta row={row} />
               <CompactMeta label="قيمة الفرق" value={formatFinancialDifference(row)} className="col-span-2" />
             </div>
 
             <div className="grid grid-cols-2 gap-2 pt-1">
-              <Button type="button" variant="secondary" className="h-10 text-xs font-semibold" onClick={() => onReview(row)}>
+              <Button type="button" className="h-10 text-xs font-bold" onClick={() => onReview(row)}>
                 🔍 مراجعة الصنف
               </Button>
               <Button type="button" variant="outline" className="h-10 text-xs font-semibold" onClick={() => onTimeline(row)}>
@@ -798,9 +883,8 @@ function getRawDiff(row: Row) {
 }
 
 function getUnitCost(_row: Row) {
-  // StockCheck currently stores selling_price, but no cost price field in inventory_items.
-  // Keep this intentionally unavailable instead of treating selling price as cost.
-  return null;
+  const value = Number(_row.last_purchase_price);
+  return Number.isFinite(value) && value > 0 ? value : null;
 }
 
 function getDifferenceFinancialValue(row: Row) {
@@ -822,8 +906,11 @@ function formatFinancialDifference(row: Row) {
 function summarizeFinancial(rows: Row[]) {
   let shortageValue: number | null = null;
   let excessValue: number | null = null;
+  let hasAnyPurchasePrice = false;
 
   for (const row of rows) {
+    if (getUnitCost(row) != null) hasAnyPurchasePrice = true;
+
     const count = getApprovedCount(row);
     if (!count) continue;
 
@@ -836,6 +923,7 @@ function summarizeFinancial(rows: Row[]) {
   }
 
   return {
+    hasAnyPurchasePrice,
     shortageValue,
     excessValue,
     netValue: shortageValue == null && excessValue == null ? null : (excessValue ?? 0) - (shortageValue ?? 0),
@@ -992,6 +1080,15 @@ function formatSimpleBoxesUnits(boxes: number | null, units: number | null) {
     units ? `${formatNumber(units)} وحدة` : null,
   ].filter(Boolean);
   return parts.length ? parts.join(" و") : "غير متوفر";
+}
+
+function formatQtyLines(value: string) {
+  const normalized = value
+    .replace(/\s+و\s+/g, " و")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) return ["0"];
+  return normalized.split(/\s+و(?=\d)/).map((part) => part.trim()).filter(Boolean);
 }
 
 function toCountSheetItem(row: Row) {

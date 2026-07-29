@@ -202,6 +202,7 @@ export type Database = {
           formatted_quantity_snapshot: string | null
           id: string
           item_name_raw: string
+          last_purchase_price: number | null
           pack_size: number | null
           quantity_parse_status: string
           raw_quantity_snapshot: number | null
@@ -226,6 +227,7 @@ export type Database = {
           formatted_quantity_snapshot?: string | null
           id?: string
           item_name_raw: string
+          last_purchase_price?: number | null
           pack_size?: number | null
           quantity_parse_status?: string
           raw_quantity_snapshot?: number | null
@@ -250,6 +252,7 @@ export type Database = {
           formatted_quantity_snapshot?: string | null
           id?: string
           item_name_raw?: string
+          last_purchase_price?: number | null
           pack_size?: number | null
           quantity_parse_status?: string
           raw_quantity_snapshot?: number | null
