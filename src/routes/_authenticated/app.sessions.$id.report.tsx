@@ -317,9 +317,11 @@ function ReportPage() {
     if (updated && updated !== reviewRow) setReviewRow(updated);
   }, [rows, reviewRow?.id]);
 
-  const handleSnapshotRefreshed = useCallback(() => {
-    void refetch();
-  }, [refetch]);
+  const handleSnapshotRefreshed = useCallback(async () => {
+    const result = await refetch();
+    const updated = result.data?.find((row) => row.id === reviewRow?.id);
+    if (updated) setReviewRow(updated);
+  }, [refetch, reviewRow?.id]);
 
   function exportVisibleRows() {
     if (visibleRows.length === 0) {

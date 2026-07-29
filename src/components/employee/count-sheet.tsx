@@ -39,8 +39,26 @@ type SessionSnapshotOverride = {
   packSize: number | null;
 };
 
+type ApprovalGateState = "idle" | "checking" | "refreshing" | "ready" | "blocked";
+
+const STOCK_CHANGED_BEFORE_APPROVAL_MESSAGE =
+  "تغيّر رصيد الصنف في المنظومة، يجب تحديث رصيد الجلسة قبل الاعتماد.";
+const SNAPSHOT_REFRESH_FAILED_MESSAGE = "تعذر تحديث رصيد الجلسة، لا يمكن اعتماد الصنف الآن.";
+const LIVE_UNAVAILABLE_MESSAGE = "تعذر التحقق من الرصيد المباشر، حاول مرة أخرى.";
+const LIVE_CHANGED_REVIEW_MESSAGE =
+  "تغيّر رصيد الصنف في المنظومة أثناء العد.\nتم تحديث رصيد الجلسة، يرجى مراجعة الكمية ثم الاعتماد من جديد.";
+
 function makeOpId() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function getItemSnapshotRaw(item: Item): number | null {
+  const raw = item.raw_quantity_snapshot == null ? null : Number(item.raw_quantity_snapshot);
+  if (Number.isFinite(raw)) return raw;
+  return qtyToRaw(
+    { boxes: item.system_boxes, units: item.system_units },
+    normalizePackSize(item.pack_size),
+  );
 }
 
 export function CountSheet({
@@ -56,7 +74,7 @@ export function CountSheet({
   onClose: () => void;
   onSaved: () => void;
   onCancelled?: () => void;
-  onSnapshotRefreshed?: () => void;
+  onSnapshotRefreshed?: () => void | Promise<void>;
 }) {
   const [boxes, setBoxes] = useState(0);
   const [units, setUnits] = useState(0);
@@ -69,6 +87,8 @@ export function CountSheet({
   const [openSnap, setOpenSnap] = useState<LiveStock | null>(null);
   const [openedAt, setOpenedAt] = useState<string | null>(null);
   const [approvalBlockMessage, setApprovalBlockMessage] = useState<string | null>(null);
+  const [approvalGate, setApprovalGate] = useState<ApprovalGateState>("idle");
+  const [approvalGateMessage, setApprovalGateMessage] = useState<string | null>(null);
   const save = useServerFn(saveCount);
   const cancelCount = useServerFn(cancelApprovedCount);
   const refreshSnapshotOnOpen = useServerFn(refreshUncountedItemSnapshotOnOpen);
@@ -87,6 +107,8 @@ export function CountSheet({
       setSnapshotOverride(null);
       setOpenSnap(null);
       setApprovalBlockMessage(null);
+      setApprovalGate(item.current?.status === "approved" ? "ready" : "checking");
+      setApprovalGateMessage(null);
       setOpenedAt(null);
       if (item.external_item_id) {
         setLiveLoading(true);
@@ -97,7 +119,27 @@ export function CountSheet({
             setOpenSnap(s);
             setOpenedAt(openedAtIso);
             setLiveError(null);
-            if (!item.current) {
+            if (item.current?.status === "approved") {
+              setApprovalGate("ready");
+              return;
+            }
+
+            const snapshotRaw = getItemSnapshotRaw(item);
+            if (s.rawQuantity == null || snapshotRaw == null) {
+              setApprovalGate("blocked");
+              setApprovalGateMessage(LIVE_UNAVAILABLE_MESSAGE);
+              return;
+            }
+
+            if (s.rawQuantity === snapshotRaw) {
+              setApprovalGate("ready");
+              setApprovalGateMessage(null);
+              return;
+            }
+
+            setApprovalGate("refreshing");
+            setApprovalGateMessage(STOCK_CHANGED_BEFORE_APPROVAL_MESSAGE);
+            try {
               const refreshed = await refreshSnapshotOnOpen({
                 data: {
                   item_id: item.id,
@@ -110,11 +152,17 @@ export function CountSheet({
                     formatted_quantity: s.formattedQuantity,
                     source_read_at: s.readAt,
                   },
-                  reason: "auto_refresh_on_first_open",
-                  allow_current_draft: false,
+                  reason: item.current?.status === "draft"
+                    ? "approval_guard_live_mismatch"
+                    : "auto_refresh_on_first_open",
+                  allow_current_draft: item.current?.status === "draft",
                 },
               });
-              if (refreshed.snapshot) {
+              const refreshedRaw = refreshed.snapshot?.raw_quantity_snapshot == null
+                ? null
+                : Number(refreshed.snapshot.raw_quantity_snapshot);
+
+              if (refreshed.snapshot && Number.isFinite(refreshedRaw) && refreshedRaw === s.rawQuantity) {
                 setSnapshotOverride({
                   systemBoxes: refreshed.snapshot.system_boxes,
                   systemUnits: refreshed.snapshot.system_units,
@@ -122,14 +170,28 @@ export function CountSheet({
                   formattedQuantity: refreshed.snapshot.system_quantity_raw,
                   packSize: refreshed.snapshot.pack_size,
                 });
-                onSnapshotRefreshed?.();
+                setApprovalGate("ready");
+                setApprovalGateMessage(null);
+                await onSnapshotRefreshed?.();
+                return;
               }
+
+              setApprovalGate("blocked");
+              setApprovalGateMessage(SNAPSHOT_REFRESH_FAILED_MESSAGE);
+            } catch {
+              setApprovalGate("blocked");
+              setApprovalGateMessage(SNAPSHOT_REFRESH_FAILED_MESSAGE);
             }
           })
           .catch((e: Error) => {
+            setApprovalGate(item.current?.status === "approved" ? "ready" : "blocked");
+            setApprovalGateMessage(LIVE_UNAVAILABLE_MESSAGE);
             setLiveError(e.message || "تعذر جلب الرصيد");
           })
           .finally(() => setLiveLoading(false));
+      } else {
+        setApprovalGate(item.current?.status === "approved" ? "ready" : "blocked");
+        setApprovalGateMessage(LIVE_UNAVAILABLE_MESSAGE);
       }
     }
   }, [item, fetchLive, refreshSnapshotOnOpen, onSnapshotRefreshed]);
@@ -174,6 +236,8 @@ export function CountSheet({
   }, [item, boxes, units, displayedSys, displayedPackSize]);
 
   const status = useMemo(() => diffStatus(diff), [diff]);
+  const approvalStatusMessage = approvalBlockMessage ?? approvalGateMessage;
+  const approveBlockedByStock = !isApproved && approvalGate !== "ready";
 
   const cancelMut = useMutation({
     mutationFn: async () => {
@@ -236,11 +300,15 @@ export function CountSheet({
           setOpenedAt(new Date().toISOString());
 
           if (submitSnap.rawQuantity == null || displayedSnapshotRaw == null) {
-            setApprovalBlockMessage("تعذر التحقق من الرصيد المباشر، حاول مرة أخرى.");
+            setApprovalGate("blocked");
+            setApprovalGateMessage(LIVE_UNAVAILABLE_MESSAGE);
+            setApprovalBlockMessage(LIVE_UNAVAILABLE_MESSAGE);
             return { blocked: true as const, reason: "live_unavailable" as const };
           }
 
           if (submitSnap.rawQuantity !== displayedSnapshotRaw) {
+            setApprovalGate("refreshing");
+            setApprovalGateMessage(STOCK_CHANGED_BEFORE_APPROVAL_MESSAGE);
             const refreshed = await refreshSnapshotOnOpen({
               data: {
                 item_id: item.id,
@@ -258,6 +326,9 @@ export function CountSheet({
               },
             });
             if (refreshed.snapshot) {
+              const refreshedRaw = refreshed.snapshot.raw_quantity_snapshot == null
+                ? null
+                : Number(refreshed.snapshot.raw_quantity_snapshot);
               setSnapshotOverride({
                 systemBoxes: refreshed.snapshot.system_boxes,
                 systemUnits: refreshed.snapshot.system_units,
@@ -265,15 +336,25 @@ export function CountSheet({
                 formattedQuantity: refreshed.snapshot.system_quantity_raw,
                 packSize: refreshed.snapshot.pack_size,
               });
-              onSnapshotRefreshed?.();
+              if (Number.isFinite(refreshedRaw) && refreshedRaw === submitSnap.rawQuantity) {
+                setApprovalGate("ready");
+                setApprovalGateMessage(null);
+              } else {
+                setApprovalGate("blocked");
+                setApprovalGateMessage(SNAPSHOT_REFRESH_FAILED_MESSAGE);
+              }
+              await onSnapshotRefreshed?.();
+            } else {
+              setApprovalGate("blocked");
+              setApprovalGateMessage(SNAPSHOT_REFRESH_FAILED_MESSAGE);
             }
-            setApprovalBlockMessage(
-              "تغيّر رصيد الصنف في المنظومة أثناء العد.\nتم تحديث رصيد الجلسة، يرجى مراجعة الكمية ثم الاعتماد من جديد.",
-            );
+            setApprovalBlockMessage(LIVE_CHANGED_REVIEW_MESSAGE);
             return { blocked: true as const, reason: "live_changed" as const };
           }
         } catch (e) {
-          setApprovalBlockMessage((e as Error).message || "تعذر التحقق من الرصيد المباشر، حاول مرة أخرى.");
+          setApprovalGate("blocked");
+          setApprovalGateMessage(SNAPSHOT_REFRESH_FAILED_MESSAGE);
+          setApprovalBlockMessage((e as Error).message || SNAPSHOT_REFRESH_FAILED_MESSAGE);
           return { blocked: true as const, reason: "live_unavailable" as const };
         }
       }
@@ -344,7 +425,62 @@ export function CountSheet({
       setOpenSnap(s);
       setOpenedAt(openedAtIso);
       setApprovalBlockMessage(null);
+      if (!isApproved) {
+        if (s.rawQuantity == null || displayedSnapshotRaw == null) {
+          setApprovalGate("blocked");
+          setApprovalGateMessage(LIVE_UNAVAILABLE_MESSAGE);
+        } else if (s.rawQuantity === displayedSnapshotRaw) {
+          setApprovalGate("ready");
+          setApprovalGateMessage(null);
+        } else {
+          setApprovalGate("refreshing");
+          setApprovalGateMessage(STOCK_CHANGED_BEFORE_APPROVAL_MESSAGE);
+          try {
+            const refreshed = await refreshSnapshotOnOpen({
+              data: {
+                item_id: item.id,
+                session_id: item.session_id,
+                live_snapshot: {
+                  raw_quantity: s.rawQuantity,
+                  pack_size: s.packSize,
+                  system_boxes: s.systemBoxes,
+                  system_units: s.systemUnits,
+                  formatted_quantity: s.formattedQuantity,
+                  source_read_at: s.readAt,
+                },
+                reason: item.current?.status === "draft"
+                  ? "approval_guard_live_mismatch"
+                  : "auto_refresh_on_first_open",
+                allow_current_draft: item.current?.status === "draft",
+              },
+            });
+            const refreshedRaw = refreshed.snapshot?.raw_quantity_snapshot == null
+              ? null
+              : Number(refreshed.snapshot.raw_quantity_snapshot);
+            if (refreshed.snapshot && Number.isFinite(refreshedRaw) && refreshedRaw === s.rawQuantity) {
+              setSnapshotOverride({
+                systemBoxes: refreshed.snapshot.system_boxes,
+                systemUnits: refreshed.snapshot.system_units,
+                rawQuantity: refreshed.snapshot.raw_quantity_snapshot,
+                formattedQuantity: refreshed.snapshot.system_quantity_raw,
+                packSize: refreshed.snapshot.pack_size,
+              });
+              setApprovalGate("ready");
+              setApprovalGateMessage(null);
+              await onSnapshotRefreshed?.();
+            } else {
+              setApprovalGate("blocked");
+              setApprovalGateMessage(SNAPSHOT_REFRESH_FAILED_MESSAGE);
+            }
+          } catch {
+            setApprovalGate("blocked");
+            setApprovalGateMessage(SNAPSHOT_REFRESH_FAILED_MESSAGE);
+          }
+        }
+      }
     } catch (e) {
+      setApprovalGate(isApproved ? "ready" : "blocked");
+      setApprovalGateMessage(LIVE_UNAVAILABLE_MESSAGE);
       setLiveError((e as Error).message || "تعذر جلب الرصيد");
     } finally {
       setLiveLoading(false);
@@ -446,10 +582,10 @@ export function CountSheet({
                 </div>
               )}
 
-              {approvalBlockMessage && (
+              {approvalStatusMessage && (
                 <div className="rounded-xl border border-warning/40 bg-warning/10 p-3">
                   <div className="text-sm font-semibold text-warning-foreground text-center whitespace-pre-line">
-                    {approvalBlockMessage}
+                    {approvalStatusMessage}
                   </div>
                 </div>
               )}
@@ -531,7 +667,7 @@ export function CountSheet({
                 <Button
                   id="btn-confirm"
                   className="h-14 font-bold text-base"
-                  disabled={isApproved || mut.isPending || liveLoading}
+                  disabled={isApproved || mut.isPending || liveLoading || approveBlockedByStock}
                   onClick={() => mut.mutate("approved")}
                 >
                   {isApproved ? "تم الاعتماد" : "اعتماد العدد"}

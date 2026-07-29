@@ -174,9 +174,11 @@ function CountPage() {
     toast.error("Barcode not found in this inventory session.");
   }, [visibleItems]);
 
-  const handleSnapshotRefreshed = useCallback(() => {
-    void refetch();
-  }, [refetch]);
+  const handleSnapshotRefreshed = useCallback(async () => {
+    const result = await refetch();
+    const updated = result.data?.find((item) => item.id === openItem?.id);
+    if (updated) setOpenItem(updated);
+  }, [refetch, openItem?.id]);
 
   useEffect(() => {
     if (!openItem?.id) return;
